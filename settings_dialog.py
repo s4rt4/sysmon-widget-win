@@ -18,10 +18,12 @@ class SettingsDialog(tk.Toplevel):
         self,
         parent: tk.Tk,
         config: dict,
+        on_apply: Callable[[], None],
         on_restart: Callable[[], None],
     ):
         super().__init__(parent)
         self.config_data = config
+        self.on_apply = on_apply
         self.on_restart = on_restart
         self.title("Sysmon Widget Settings")
         self.resizable(False, False)
@@ -97,7 +99,7 @@ class SettingsDialog(tk.Toplevel):
         ttk.Button(buttons, text="Cancel", command=self.destroy).pack(
             side="right", padx=(8, 0)
         )
-        ttk.Button(buttons, text="Save", command=self._save).pack(
+        ttk.Button(buttons, text="Save", command=self._save_and_apply).pack(
             side="right", padx=(8, 0)
         )
         ttk.Button(
@@ -132,7 +134,7 @@ class SettingsDialog(tk.Toplevel):
             return False
         messagebox.showinfo(
             "Settings",
-            f"Saved to:\n{config_path()}\n\nRestart the widget to apply layout changes.",
+            f"Saved to:\n{config_path()}",
             parent=self,
         )
         return True
@@ -141,6 +143,10 @@ class SettingsDialog(tk.Toplevel):
         if self._save():
             self.destroy()
             self.on_restart()
+
+    def _save_and_apply(self) -> None:
+        if self._save():
+            self.on_apply()
 
     def _apply_to_config(self) -> None:
         city_id = int(self.vars["city_id"].get())
@@ -213,6 +219,7 @@ class SettingsDialog(tk.Toplevel):
 def show_settings_dialog(
     parent: tk.Tk,
     config: dict,
+    on_apply: Callable[[], None],
     on_restart: Callable[[], None],
 ) -> None:
     for child in parent.winfo_children():
@@ -220,4 +227,4 @@ def show_settings_dialog(
             child.lift()
             child.focus_force()
             return
-    SettingsDialog(parent, config, on_restart)
+    SettingsDialog(parent, config, on_apply, on_restart)

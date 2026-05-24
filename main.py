@@ -27,6 +27,7 @@ from widget import WidgetLayout
 
 
 WINDOW_TITLE = "sysmon-widget"
+_LAYOUT: WidgetLayout | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -90,15 +91,7 @@ def main() -> None:
     root.configure(bg=TRANSPARENT_KEY)
     root.wm_attributes("-transparentcolor", TRANSPARENT_KEY)
 
-    # ── Build layout ───────────────────────────────────────────────────────
-    layout = WidgetLayout(root, CONFIG)
-    layout.build()
-    root.update_idletasks()
-
-    # ── Size & position ────────────────────────────────────────────────────
-    height = max(1, root.winfo_reqheight())
-    x, y   = calculate_position(root, CONFIG["width"], height)
-    root.geometry(f"{CONFIG['width']}x{height}+{x}+{y}")
+    rebuild_widget(root, apply_hints=not args.managed)
 
     # ── Win32 window hints (after window is realised) ──────────────────────
     if not args.managed:
@@ -107,7 +100,10 @@ def main() -> None:
     tray = TrayApp(
         root,
         show_settings=lambda: show_settings_dialog(
-            root, CONFIG, lambda: _restart_app(root, tray)
+            root,
+            CONFIG,
+            lambda: rebuild_widget(root, apply_hints=not args.managed),
+            lambda: _restart_app(root, tray),
         ),
         restart_app=lambda: _restart_app(root, tray),
         quit_app=lambda: _quit_app(root, tray),
@@ -124,6 +120,24 @@ def _apply_hints(root: tk.Tk) -> None:
         send_to_desktop(root)     # push behind all normal windows
     except Exception as exc:
         print(f"[win_hints] {exc}")
+
+
+def rebuild_widget(root: tk.Tk, apply_hints: bool = True) -> None:
+    global _LAYOUT
+    apply_theme(CONFIG.get("theme"))
+    for child in root.winfo_children():
+        child.destroy()
+
+    _LAYOUT = WidgetLayout(root, CONFIG)
+    _LAYOUT.build()
+    root.update_idletasks()
+
+    height = max(1, root.winfo_reqheight())
+    x, y = calculate_position(root, CONFIG["width"], height)
+    root.geometry(f"{CONFIG['width']}x{height}+{x}+{y}")
+
+    if apply_hints:
+        root.after(200, lambda: _apply_hints(root))
 
 
 def _restart_app(root: tk.Tk, tray: TrayApp) -> None:
