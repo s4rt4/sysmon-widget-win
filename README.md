@@ -120,10 +120,10 @@ Useful settings include:
 
 ## Autostart
 
-The tray setting `Start with Windows` writes a user-level registry entry:
+The tray setting `Start with Windows` writes a user-level startup script:
 
 ```text
-HKCU\Software\Microsoft\Windows\CurrentVersion\Run\SysmonWidget
+%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup\SysmonWidget.vbs
 ```
 
 It does not require administrator access.

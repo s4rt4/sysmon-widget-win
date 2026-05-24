@@ -8,14 +8,7 @@ import sys
 from pathlib import Path
 
 
-RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
-VALUE_NAME = "SysmonWidget"
-
-
-def _winreg():
-    import winreg
-
-    return winreg
+SCRIPT_NAME = "SysmonWidget.vbs"
 
 
 def startup_command() -> str:
@@ -29,34 +22,47 @@ def startup_command() -> str:
     return f'"{launcher}" "{main_path}"'
 
 
+def startup_dir() -> Path:
+    appdata = os.environ.get("APPDATA")
+    if appdata:
+        return (
+            Path(appdata)
+            / "Microsoft"
+            / "Windows"
+            / "Start Menu"
+            / "Programs"
+            / "Startup"
+        )
+    return Path.home() / "AppData" / "Roaming" / "Microsoft" / "Windows" / "Start Menu" / "Programs" / "Startup"
+
+
+def startup_script_path() -> Path:
+    return startup_dir() / SCRIPT_NAME
+
+
 def is_enabled() -> bool:
-    if os.name != "nt":
-        return False
-    winreg = _winreg()
+    path = startup_script_path()
     try:
-        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_KEY) as key:
-            value, _ = winreg.QueryValueEx(key, VALUE_NAME)
-            return value == startup_command()
-    except FileNotFoundError:
-        return False
+        return path.exists() and path.read_text(encoding="utf-8") == _script_text()
     except OSError:
         return False
 
 
 def set_enabled(enabled: bool) -> None:
-    if os.name != "nt":
+    path = startup_script_path()
+    if enabled:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(_script_text(), encoding="utf-8")
         return
-    winreg = _winreg()
-    with winreg.OpenKey(
-        winreg.HKEY_CURRENT_USER,
-        RUN_KEY,
-        0,
-        winreg.KEY_SET_VALUE,
-    ) as key:
-        if enabled:
-            winreg.SetValueEx(key, VALUE_NAME, 0, winreg.REG_SZ, startup_command())
-        else:
-            try:
-                winreg.DeleteValue(key, VALUE_NAME)
-            except FileNotFoundError:
-                pass
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        pass
+
+
+def _script_text() -> str:
+    command = startup_command().replace('"', '""')
+    return (
+        'Set WshShell = CreateObject("WScript.Shell")\n'
+        f'WshShell.Run "{command}", 0, False\n'
+    )

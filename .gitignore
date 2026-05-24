@@ -4,5 +4,6 @@ __pycache__/
 build/
 build-deb/
 dist/
+release/
 *.deb
 local_config.py

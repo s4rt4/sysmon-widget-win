@@ -5,6 +5,7 @@ python -m PyInstaller `
   --clean `
   --onedir `
   --windowed `
+  --noupx `
   --name SysmonWidget `
   --hidden-import pystray._win32 `
   --hidden-import winrt.windows.media.control `
