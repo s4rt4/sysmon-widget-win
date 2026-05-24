@@ -43,8 +43,8 @@ def _wmi_temperature() -> float | None:
             creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
         result = subprocess.run(
-            ["powershell", "-NoProfile", "-NonInteractive",
-             "-ExecutionPolicy", "Bypass", "-Command", _TEMP_PS_CMD],
+            ["powershell.exe", "-NoLogo", "-NoProfile", "-NonInteractive",
+             "-Command", _TEMP_PS_CMD],
             capture_output=True,
             text=True,
             timeout=3,

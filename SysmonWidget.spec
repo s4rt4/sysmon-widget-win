@@ -2,7 +2,7 @@
 
 
 a = Analysis(
-    ['main.py'],
+    ['sysmon_widget.py'],
     pathex=[],
     binaries=[],
     datas=[],
@@ -32,6 +32,7 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
+    version='version_info.txt',
 )
 coll = COLLECT(
     exe,

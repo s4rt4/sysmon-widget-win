@@ -8,7 +8,7 @@ from tkinter import messagebox, ttk
 from typing import Callable
 
 from app_settings import config_path, save_settings, snapshot_config
-from config import CONFIG, THEMES
+from config import THEMES
 from utils.autostart import is_enabled as autostart_is_enabled
 from utils.autostart import set_enabled as set_autostart_enabled
 
@@ -42,35 +42,35 @@ class SettingsDialog(tk.Toplevel):
 
         row = 0
         row = self._section(outer, row, "Appearance")
-        self.vars["theme"] = tk.StringVar()
+        self.vars["theme"] = tk.StringVar(master=self)
         self._combo(outer, row, "Theme", "theme", sorted(THEMES))
         row += 1
-        self.vars["width"] = tk.IntVar()
+        self.vars["width"] = tk.IntVar(master=self)
         self._spin(outer, row, "Width", "width", 260, 600)
         row += 1
 
         row = self._section(outer, row, "Weather")
-        self.vars["api_key"] = tk.StringVar()
+        self.vars["api_key"] = tk.StringVar(master=self)
         self._entry(outer, row, "API key", "api_key", show="*")
         row += 1
-        self.vars["city_id"] = tk.IntVar()
+        self.vars["city_id"] = tk.IntVar(master=self)
         self._spin(outer, row, "City ID", "city_id", 0, 9999999)
         row += 1
-        self.vars["city"] = tk.StringVar()
+        self.vars["city"] = tk.StringVar(master=self)
         self._entry(outer, row, "City", "city")
         row += 1
-        self.vars["country_code"] = tk.StringVar()
+        self.vars["country_code"] = tk.StringVar(master=self)
         self._entry(outer, row, "Country", "country_code", width=8)
         row += 1
 
         row = self._section(outer, row, "Position")
-        self.vars["anchor"] = tk.StringVar()
+        self.vars["anchor"] = tk.StringVar(master=self)
         self._combo(outer, row, "Anchor", "anchor", ("right", "left"))
         row += 1
-        self.vars["pos_x"] = tk.IntVar()
+        self.vars["pos_x"] = tk.IntVar(master=self)
         self._spin(outer, row, "X offset", "pos_x", 0, 2000)
         row += 1
-        self.vars["pos_y"] = tk.IntVar()
+        self.vars["pos_y"] = tk.IntVar(master=self)
         self._spin(outer, row, "Y offset", "pos_y", 0, 2000)
         row += 1
 
@@ -78,7 +78,7 @@ class SettingsDialog(tk.Toplevel):
         panel_frame = ttk.Frame(outer)
         panel_frame.grid(row=row, column=0, columnspan=2, sticky="w", pady=(2, 8))
         for idx, name in enumerate(self.config_data["panels"]):
-            self.vars[f"panel_{name}"] = tk.BooleanVar()
+            self.vars[f"panel_{name}"] = tk.BooleanVar(master=self)
             ttk.Checkbutton(
                 panel_frame,
                 text=name.title(),
@@ -86,7 +86,7 @@ class SettingsDialog(tk.Toplevel):
             ).grid(row=idx // 3, column=idx % 3, sticky="w", padx=(0, 14), pady=2)
         row += 1
 
-        self.vars["autostart"] = tk.BooleanVar()
+        self.vars["autostart"] = tk.BooleanVar(master=self)
         ttk.Checkbutton(
             outer,
             text="Start with Windows",
@@ -182,8 +182,9 @@ class SettingsDialog(tk.Toplevel):
         return row + 1
 
     def _entry(self, parent, row: int, label: str, key: str, **kwargs) -> None:
+        width = kwargs.pop("width", 32)
         ttk.Label(parent, text=label).grid(row=row, column=0, sticky="w", pady=2)
-        ttk.Entry(parent, textvariable=self.vars[key], width=32, **kwargs).grid(
+        ttk.Entry(parent, textvariable=self.vars[key], width=width, **kwargs).grid(
             row=row, column=1, sticky="ew", pady=2
         )
 

@@ -10,7 +10,7 @@ from app_settings import load_settings
 
 
 # ---------------------------------------------------------------------------
-# Transparent colour key — must match root.configure(bg=...) in main.py
+# Transparent colour key — must match root.configure(bg=...) in sysmon_widget.py
 # Avoid pure black (#000000) as it clashes with some icon shadows.
 # ---------------------------------------------------------------------------
 TRANSPARENT_KEY = "#010101"
@@ -134,8 +134,8 @@ CONFIG = {
     "weather": {
         "api_key":     os.environ.get("OPENWEATHERMAP_API_KEY")
                        or os.environ.get("SYSMON_WIDGET_WEATHER_API_KEY", ""),
-        "city_id":     1646494,          # Sampit
-        "city":        "Sampit",
+        "city_id":     0,                # 0 = use city,country query
+        "city":        "Cileungsi",
         "country_code":"ID",
         "units":       "metric",
         "refresh_sec": 600,

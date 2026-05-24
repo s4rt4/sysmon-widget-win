@@ -15,14 +15,14 @@ From PowerShell:
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install -r requirements.txt
-python main.py --managed
+python sysmon_widget.py --managed
 ```
 
 `--managed` runs the widget as a normal debug window. To run it as a desktop
 widget hidden from the taskbar with a tray icon:
 
 ```powershell
-python main.py
+python sysmon_widget.py
 ```
 
 ## Settings
@@ -54,7 +54,7 @@ PowerShell environment variable:
 
 ```powershell
 $env:OPENWEATHERMAP_API_KEY = "YOUR_OPENWEATHERMAP_API_KEY"
-python main.py
+python sysmon_widget.py
 ```
 
 Persistent local config:
@@ -79,7 +79,7 @@ after local config and take priority.
 Choose a theme with:
 
 ```powershell
-python main.py --theme graphite
+python sysmon_widget.py --theme graphite
 ```
 
 Available themes:
@@ -120,10 +120,10 @@ Useful settings include:
 
 ## Autostart
 
-The tray setting `Start with Windows` writes a user-level startup script:
+The tray setting `Start with Windows` writes a user-level registry value:
 
 ```text
-%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup\SysmonWidget.vbs
+HKCU\Software\Microsoft\Windows\CurrentVersion\Run\SysmonWidget
 ```
 
 It does not require administrator access.
@@ -144,6 +144,10 @@ dist\SysmonWidget\SysmonWidget.exe
 
 The generated EXE is windowless, starts the desktop widget, and exposes controls
 from the system tray.
+
+The build uses `--onedir`, `--noupx`, and Windows version metadata to reduce
+false-positive antivirus detections. For distribution beyond your own machine,
+code-signing the generated `SysmonWidget.exe` is still recommended.
 
 ## Notes
 

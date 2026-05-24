@@ -16,7 +16,7 @@ mkdir -p \
   "$BUILD_DIR/etc/xdg/autostart" \
   "$DIST_DIR"
 
-cp "$ROOT_DIR"/main.py "$ROOT_DIR"/config.py "$ROOT_DIR"/widget.py "$ROOT_DIR"/README.md "$ROOT_DIR"/requirements.txt "$BUILD_DIR/opt/sysmon-widget/"
+cp "$ROOT_DIR"/sysmon_widget.py "$ROOT_DIR"/config.py "$ROOT_DIR"/widget.py "$ROOT_DIR"/README.md "$ROOT_DIR"/requirements.txt "$BUILD_DIR/opt/sysmon-widget/"
 cp "$ROOT_DIR"/panels/*.py "$BUILD_DIR/opt/sysmon-widget/panels/"
 cp "$ROOT_DIR"/utils/*.py "$BUILD_DIR/opt/sysmon-widget/utils/"
 cp "$ROOT_DIR"/packaging/linux/sysmon-widget.desktop "$BUILD_DIR/etc/xdg/autostart/sysmon-widget.desktop"
@@ -53,7 +53,7 @@ EOF
 cat > "$BUILD_DIR/usr/bin/sysmon-widget" <<'EOF'
 #!/usr/bin/env sh
 cd /opt/sysmon-widget || exit 1
-exec /usr/bin/python3 /opt/sysmon-widget/main.py "$@"
+exec /usr/bin/python3 /opt/sysmon-widget/sysmon_widget.py "$@"
 EOF
 
 chmod 0755 "$BUILD_DIR/DEBIAN/postinst" "$BUILD_DIR/DEBIAN/postrm" "$BUILD_DIR/usr/bin/sysmon-widget"
