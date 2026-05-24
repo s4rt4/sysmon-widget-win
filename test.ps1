@@ -1,0 +1,1 @@
+try { $t = (Get-WmiObject Win32_PerfFormattedData_Counters_ThermalZoneInformation -ErrorAction Stop | Select-Object -First 1).Temperature; Write-Output ($t - 273) } catch { Write-Output $_.Exception.Message }

@@ -1,0 +1,7 @@
+__pycache__/
+*.py[cod]
+.venv/
+build-deb/
+dist/
+*.deb
+local_config.py

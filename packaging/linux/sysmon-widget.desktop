@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Sysmon Widget
+Comment=Desktop system monitor widget
+Exec=/usr/bin/sysmon-widget
+Path=/opt/sysmon-widget
+Terminal=false
+StartupNotify=false
+X-GNOME-Autostart-enabled=true
