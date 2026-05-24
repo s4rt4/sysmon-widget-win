@@ -172,6 +172,7 @@ CONFIG = {
     # ── Storage ─────────────────────────────────────────────────────────────
     "storage": {
         "paths":      "auto",            # "auto" = detect all drives
+        "max_items":  2,
         "bar_height": 5,
         "refresh_sec": 30,
     },

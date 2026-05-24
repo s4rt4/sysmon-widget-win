@@ -115,7 +115,7 @@ Useful settings include:
 - `weather`: city, city id, units, refresh interval
 - `network`: interface selection and history length
 - `sysstat`: gauge size, refresh interval, battery and temperature visibility
-- `storage`: auto-detected drives or explicit paths
+- `storage`: auto-detected drives or explicit paths, max visible drives
 - `music`: refresh interval, marquee speed, visualizer settings
 
 ## Autostart

@@ -90,7 +90,7 @@ class SysStatPanel:
         gap = self.config.get("panel_gap", 10)
         card_width = max(1, (self.config["width"] - gap * 3) // 4)
 
-        for key, label, color in self._gauge_defs():
+        for key, label, ring_color, text_color in self._gauge_defs():
             card_cfg = self.config.copy()
             card_cfg["width"] = card_width
             card = PanelCard(self.widget, card_cfg, width=card_width)
@@ -110,9 +110,9 @@ class SysStatPanel:
                 cell,
                 self.sys_cfg["ring_size"],
                 self.sys_cfg["ring_width"],
-                color or self.config["accent"]["primary"],
+                ring_color or self.config["accent"]["primary"],
                 self.config["accent"]["track_bg"],
-                self.config["accent"]["text_main"],
+                text_color or self.config["accent"]["text_main"],
                 self.config["panel_bg"],
                 font=font,
                 font_size=10,
@@ -136,11 +136,13 @@ class SysStatPanel:
     def _gauge_defs(self) -> list[tuple]:
         s = self.sys_cfg
         primary = self.config["accent"]["primary"]
+        secondary = self.config["accent"]["secondary"]
+        text_main = self.config["accent"]["text_main"]
         return [
-            ("cpu",     "CPU",  s.get("cpu_color")     or primary),
-            ("ram",     "RAM",  s.get("ram_color")      or primary),
-            ("battery", "BAT",  s.get("battery_color")  or primary),
-            ("temp",    "TEMP", s.get("temp_color")     or self.config["accent"]["secondary"]),
+            ("cpu",     "CPU",  s.get("cpu_color")     or primary, text_main),
+            ("ram",     "RAM",  s.get("ram_color")      or secondary, primary),
+            ("battery", "BAT",  s.get("battery_color")  or primary, text_main),
+            ("temp",    "TEMP", s.get("temp_color")     or secondary, primary),
         ]
 
     # ------------------------------------------------------------------

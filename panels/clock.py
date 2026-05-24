@@ -49,7 +49,7 @@ class ClockPanel:
         self.date_label = make_label(
             self.widget.inner, config,
             size=clock_cfg["date_font_size"],
-            color=accent["text_muted"],
+            color=accent["primary"],
             anchor="center",
         )
         self.time_label.pack(fill="x")

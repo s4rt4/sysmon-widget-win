@@ -53,7 +53,7 @@ class ProcessPanel:
         )
         self.proc_detail = make_label(
             self.right, config, text="CPU --  RAM --", size=9,
-            color=config["accent"]["text_muted"],
+            color=config["accent"]["primary"],
         )
 
         for label in (

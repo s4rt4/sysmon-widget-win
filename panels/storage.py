@@ -52,7 +52,8 @@ class StoragePanel:
         else:
             paths = paths_cfg
 
-        self._build_rows(inner, paths)
+        max_items = self.storage_cfg.get("max_items", 2)
+        self._build_rows(inner, paths[:max_items])
         self._tick()
         self.widget.after(80, self.widget.update_height)
 
