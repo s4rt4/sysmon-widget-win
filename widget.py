@@ -9,18 +9,20 @@ from utils.ui import make_separator
 from panels.clock   import ClockPanel
 from panels.music   import MusicPanel
 from panels.network import NetworkPanel
+from panels.process import ProcessPanel
 from panels.storage import StoragePanel
 from panels.sysstat import SysStatPanel
 from panels.weather import WeatherPanel
 
 
-PANEL_ORDER = ["clock", "weather", "network", "sysstat", "storage", "music"]
+PANEL_ORDER = ["clock", "weather", "network", "sysstat", "process", "storage", "music"]
 
 PANEL_CLASSES = {
     "clock":   ClockPanel,
     "weather": WeatherPanel,
     "network": NetworkPanel,
     "sysstat": SysStatPanel,
+    "process": ProcessPanel,
     "storage": StoragePanel,
     "music":   MusicPanel,
 }
@@ -89,7 +91,14 @@ class WidgetLayout:
             self.panels.append(p)
             _add_gap()
 
-        # ── Row 4: Storage & Music (Side-by-side) ──
+        # ── Row 4: Uptime & top process ──
+        if enabled.get("process"):
+            p = ProcessPanel(frame, self.config)
+            p.widget.pack(fill="x")
+            self.panels.append(p)
+            _add_gap()
+
+        # ── Row 5: Storage & Music (Side-by-side) ──
         has_storage = enabled.get("storage")
         has_music   = enabled.get("music")
         if has_storage or has_music:
@@ -112,4 +121,3 @@ class WidgetLayout:
                 pm = MusicPanel(row4, m_cfg)
                 pm.widget.pack(side="left", fill="both", expand=True)
                 self.panels.append(pm)
-

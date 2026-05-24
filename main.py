@@ -9,7 +9,10 @@ Changes from Debian version:
   - Position is fixed right-side; no dragging
 """
 import argparse
+import subprocess
+import sys
 import tkinter as tk
+from pathlib import Path
 
 try:
     import psutil
@@ -17,6 +20,8 @@ except ImportError:
     psutil = None
 
 from config import CONFIG, THEMES, TRANSPARENT_KEY, apply_theme
+from settings_dialog import show_settings_dialog
+from tray_app import TrayApp
 from utils.win_hints import apply_win32_hints, send_to_desktop
 from widget import WidgetLayout
 
@@ -99,7 +104,18 @@ def main() -> None:
     if not args.managed:
         root.after(200, lambda: _apply_hints(root))
 
+    tray = TrayApp(
+        root,
+        show_settings=lambda: show_settings_dialog(
+            root, CONFIG, lambda: _restart_app(root, tray)
+        ),
+        restart_app=lambda: _restart_app(root, tray),
+        quit_app=lambda: _quit_app(root, tray),
+    )
+    tray.start()
+
     root.mainloop()
+    tray.stop()
 
 
 def _apply_hints(root: tk.Tk) -> None:
@@ -108,6 +124,21 @@ def _apply_hints(root: tk.Tk) -> None:
         send_to_desktop(root)     # push behind all normal windows
     except Exception as exc:
         print(f"[win_hints] {exc}")
+
+
+def _restart_app(root: tk.Tk, tray: TrayApp) -> None:
+    tray.stop()
+    if getattr(sys, "frozen", False):
+        args = [sys.executable]
+    else:
+        args = [sys.executable, str(Path(__file__).resolve())]
+    subprocess.Popen(args, cwd=str(Path(__file__).resolve().parent))
+    root.destroy()
+
+
+def _quit_app(root: tk.Tk, tray: TrayApp) -> None:
+    tray.stop()
+    root.destroy()
 
 
 if __name__ == "__main__":

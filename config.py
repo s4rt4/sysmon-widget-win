@@ -6,6 +6,8 @@ import importlib.util
 import os
 from pathlib import Path
 
+from app_settings import load_settings
+
 
 # ---------------------------------------------------------------------------
 # Transparent colour key — must match root.configure(bg=...) in main.py
@@ -115,6 +117,7 @@ CONFIG = {
         "weather": True,
         "network": True,
         "sysstat": True,
+        "process": True,
         "storage": True,
         "music":   True,
     },
@@ -159,6 +162,11 @@ CONFIG = {
         "ram_color":      None,
         "battery_color":  None,
         "temp_color":     "#F7EBED",     # cream for temp gauge
+    },
+
+    # Process / uptime
+    "process": {
+        "refresh_ms":     3000,
     },
 
     # ── Storage ─────────────────────────────────────────────────────────────
@@ -210,6 +218,10 @@ def _load_local_config() -> None:
     # User-local config can override project-local settings.
     _load_config_file(Path.home() / ".config" / "sysmon-widget" / "config.py",
                       "sysmon_widget_user_config")
+    # App settings are written by the Windows settings dialog.
+    local_settings = load_settings()
+    if isinstance(local_settings, dict):
+        _merge_dict(CONFIG, local_settings)
 
 
 _load_local_config()

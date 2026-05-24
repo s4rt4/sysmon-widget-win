@@ -4,7 +4,8 @@ Conky-style desktop system monitor widget built with Python and Tkinter.
 
 The current app targets Windows. It uses Tkinter transparent-color windows,
 Win32 window hints, psutil system metrics, OpenWeatherMap weather data, and
-Windows SMTC media sessions for the music panel.
+Windows SMTC media sessions for the music panel. A system tray icon provides
+settings, show/hide, restart, autostart, and exit controls.
 
 ## Setup
 
@@ -18,11 +19,31 @@ python main.py --managed
 ```
 
 `--managed` runs the widget as a normal debug window. To run it as a desktop
-widget hidden from the taskbar:
+widget hidden from the taskbar with a tray icon:
 
 ```powershell
 python main.py
 ```
+
+## Settings
+
+Right-click the tray icon and choose `Settings`.
+
+Settings are saved to:
+
+```text
+%APPDATA%\SysmonWidget\config.json
+```
+
+The settings dialog can configure:
+
+- Theme
+- Weather API key
+- Weather city ID, city name, and country code
+- Widget width
+- Widget position anchor, X offset, and Y offset
+- Enabled panels
+- Start with Windows
 
 ## Weather API Key
 
@@ -50,7 +71,8 @@ LOCAL_CONFIG = {
 ```
 
 During local development you can also create `local_config.py` in the project
-root. That file is gitignored.
+root. That file is gitignored. Settings saved by the tray dialog are loaded
+after local config and take priority.
 
 ## Themes
 
@@ -95,6 +117,33 @@ Useful settings include:
 - `sysstat`: gauge size, refresh interval, battery and temperature visibility
 - `storage`: auto-detected drives or explicit paths
 - `music`: refresh interval, marquee speed, visualizer settings
+
+## Autostart
+
+The tray setting `Start with Windows` writes a user-level registry entry:
+
+```text
+HKCU\Software\Microsoft\Windows\CurrentVersion\Run\SysmonWidget
+```
+
+It does not require administrator access.
+
+## Build EXE
+
+Install dependencies, then run:
+
+```powershell
+.\build-exe.ps1
+```
+
+The app is built as:
+
+```text
+dist\SysmonWidget\SysmonWidget.exe
+```
+
+The generated EXE is windowless, starts the desktop widget, and exposes controls
+from the system tray.
 
 ## Notes
 
