@@ -2,8 +2,10 @@ __pycache__/
 *.py[cod]
 .venv/
 build/
+build-native/
 build-deb/
 dist/
 release/
 *.deb
 local_config.py
+rewrite-plan.md

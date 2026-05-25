@@ -75,7 +75,8 @@ class SysStatPanel:
         self.gauges: dict[str, RingGauge] = {}
         self.cards: list[PanelCard] = []
         self._cached_temp: float | None = None
-        self._temp_tick   = 0        # slow-poll counter for WMI (expensive call)
+        self._last_good_temp: float | None = None
+        self._last_temp_poll_ms = 0
         self._temp_queue: queue.Queue = queue.Queue()
         self._temp_in_flight = False
 
@@ -150,13 +151,17 @@ class SysStatPanel:
     def _tick(self) -> None:
         self._drain_temp_queue()
 
-        # Poll WMI temperature every ~6 seconds (every 4 ticks of 1.5 s)
-        self._temp_tick = (self._temp_tick + 1) % 4
+        now_ms = int(self.widget.winfo_toplevel().tk.call("clock", "milliseconds"))
+        temp_refresh_ms = int(self.sys_cfg.get("temp_refresh_sec", 60) * 1000)
         if (
             self.sys_cfg.get("show_temp")
             and not self._temp_in_flight
-            and (self._temp_tick == 0 or self._cached_temp is None)
+            and (
+                self._cached_temp is None
+                or now_ms - self._last_temp_poll_ms >= temp_refresh_ms
+            )
         ):
+            self._last_temp_poll_ms = now_ms
             self._temp_in_flight = True
             threading.Thread(target=self._poll_temperature, daemon=True).start()
 
@@ -173,7 +178,10 @@ class SysStatPanel:
     def _drain_temp_queue(self) -> None:
         try:
             while True:
-                self._cached_temp = self._temp_queue.get_nowait()
+                value = self._temp_queue.get_nowait()
+                self._cached_temp = value
+                if value is not None:
+                    self._last_good_temp = value
                 self._temp_in_flight = False
         except queue.Empty:
             pass
@@ -194,7 +202,7 @@ class SysStatPanel:
                 battery = None
 
         # Temperature (cached from WMI slow poll)
-        temp = self._cached_temp if self.sys_cfg.get("show_temp") else None
+        temp = self._last_good_temp if self.sys_cfg.get("show_temp") else None
 
         return {
             "cpu":  (cpu, f"{cpu:.0f}%"),

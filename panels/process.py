@@ -18,6 +18,7 @@ class ProcessPanel:
         self.config = config
         self.proc_cfg = config["process"]
         self.widget = PanelCard(parent, config, width=config["width"])
+        self._last_top_scan_ms = 0
 
         inner = self.widget.inner
         gap = max(8, config.get("panel_gap", 10))
@@ -72,8 +73,12 @@ class ProcessPanel:
 
     def _tick(self) -> None:
         self._render_uptime()
-        self._render_top_process()
-        self.widget.after(self.proc_cfg["refresh_ms"], self._tick)
+        now_ms = int(self.widget.winfo_toplevel().tk.call("clock", "milliseconds"))
+        top_refresh_ms = int(self.proc_cfg.get("top_refresh_ms", 15000))
+        if now_ms - self._last_top_scan_ms >= top_refresh_ms:
+            self._last_top_scan_ms = now_ms
+            self._render_top_process()
+        self.widget.after(max(3000, int(self.proc_cfg["refresh_ms"])), self._tick)
 
     def _render_uptime(self) -> None:
         if psutil is None:

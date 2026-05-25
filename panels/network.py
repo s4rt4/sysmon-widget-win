@@ -24,6 +24,7 @@ class NetworkPanel:
         self.last_time  = None
         self.total_down = 0.0
         self.total_up   = 0.0
+        self._iface_checked_at = 0.0
 
         inner = self.widget.inner
 
@@ -88,23 +89,26 @@ class NetworkPanel:
 
         self.last      = counter
         self.last_time = now
-        self.widget.after(self.net_cfg["refresh_ms"], self._tick)
+        self.widget.after(max(1500, int(self.net_cfg["refresh_ms"])), self._tick)
 
     def _counter(self):
-        iface = (
-            self._active_interface()
-            if self.net_cfg["interface"] == "auto"
-            else self.net_cfg["interface"]
-        )
+        counters = psutil.net_io_counters(pernic=True)
+        if self.net_cfg["interface"] == "auto":
+            now = time.monotonic()
+            if self.interface is None or now - self._iface_checked_at > 10:
+                self.interface = self._active_interface(counters)
+                self._iface_checked_at = now
+            iface = self.interface
+        else:
+            iface = self.net_cfg["interface"]
         self.interface = iface
         if iface:
             self.iface_label.configure(text=f"  {iface}")
         if iface is None:
             return None
-        return psutil.net_io_counters(pernic=True).get(iface)
+        return counters.get(iface)
 
-    def _active_interface(self) -> str | None:
-        counters = psutil.net_io_counters(pernic=True)
+    def _active_interface(self, counters) -> str | None:
         candidates = [
             (name, c.bytes_recv + c.bytes_sent)
             for name, c in counters.items()

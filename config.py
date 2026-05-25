@@ -147,7 +147,7 @@ CONFIG = {
     "network": {
         "interface":   "auto",
         "history_len": 40,
-        "refresh_ms":  1000,
+        "refresh_ms":  2000,
         "unit":        "KiB",
     },
 
@@ -156,6 +156,7 @@ CONFIG = {
         "refresh_ms":     1500,
         "show_battery":   True,
         "show_temp":      True,
+        "temp_refresh_sec": 60,
         "ring_size":      58,
         "ring_width":     6,
         "cpu_color":      None,          # None → use accent.primary
@@ -166,7 +167,8 @@ CONFIG = {
 
     # Process / uptime
     "process": {
-        "refresh_ms":     3000,
+        "refresh_ms":     5000,
+        "top_refresh_ms": 15000,
     },
 
     # ── Storage ─────────────────────────────────────────────────────────────
@@ -179,7 +181,8 @@ CONFIG = {
 
     # ── Music ────────────────────────────────────────────────────────────────
     "music": {
-        "refresh_ms":      2000,
+        "refresh_ms":      5000,
+        "animate_ms":      200,
         "marquee_speed":   30,
         "show_visualizer": True,
         "vis_bars":        20,

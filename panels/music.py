@@ -118,6 +118,8 @@ class MusicPanel:
         self.title_text  = ""
         self.title_offset = 0.0
         self.vis_values  = [4] * self.music_cfg["vis_bars"]
+        self._fetch_in_flight = False
+        self._fetch_started_ms = 0
 
         # Async result queue
         self._info_queue: queue.Queue = queue.Queue()
@@ -183,21 +185,27 @@ class MusicPanel:
     # ------------------------------------------------------------------
 
     def _schedule_refresh(self) -> None:
-        if _WINRT_OK:
+        if _WINRT_OK and not self._fetch_in_flight:
+            self._fetch_in_flight = True
+            self._fetch_started_ms = int(self.widget.winfo_toplevel().tk.call("clock", "milliseconds"))
             t = threading.Thread(
                 target=_fetch_smtc_threaded,
                 args=(self._info_queue,),
                 daemon=True,
             )
             t.start()
-        self.widget.after(self.music_cfg["refresh_ms"], self._check_refresh)
+        refresh_ms = max(5000, int(self.music_cfg.get("refresh_ms", 5000)))
+        self.widget.after(refresh_ms, self._check_refresh)
 
     def _check_refresh(self) -> None:
         try:
             info = self._info_queue.get_nowait()
+            self._fetch_in_flight = False
             self._apply_info(info)
         except queue.Empty:
-            pass
+            now_ms = int(self.widget.winfo_toplevel().tk.call("clock", "milliseconds"))
+            if self._fetch_in_flight and now_ms - self._fetch_started_ms > 10000:
+                self._fetch_in_flight = False
         self._schedule_refresh()
 
     def _apply_info(self, info: dict) -> None:
@@ -209,8 +217,6 @@ class MusicPanel:
         title = info.get("title") or "No track"
         artist = info.get("artist") or ""
         album  = info.get("album") or ""
-
-        is_playing = self.status in ("Playing",)
 
         self.status_label.configure(text=f"♪  {self.status}")
         parts = [p for p in (artist, album) if p]
@@ -239,7 +245,7 @@ class MusicPanel:
         if self.status == "Playing":
             self.vis_values = [
                 max(4, min(self.music_cfg["vis_height"],
-                           v + random.randint(-5, 8)))
+                           int(v * 0.55 + random.randint(4, self.music_cfg["vis_height"]) * 0.45)))
                 for v in self.vis_values
             ]
         else:
@@ -247,7 +253,10 @@ class MusicPanel:
 
         self._draw_visualizer()
         self._draw_title()
-        self.widget.after(80, self._animate)
+        delay = self.music_cfg.get("animate_ms", 200)
+        if self.status != "Playing":
+            delay = max(1000, delay)
+        self.widget.after(delay, self._animate)
 
     # ------------------------------------------------------------------
     # Drawing helpers
@@ -268,7 +277,8 @@ class MusicPanel:
         text_w = (bbox[2] - bbox[0]) if bbox else 0
         if text_w > w:
             speed = self.music_cfg.get("marquee_speed", 30)
-            self.title_offset = (self.title_offset + speed / 12.5) % (text_w + 30)
+            if self.status == "Playing":
+                self.title_offset = (self.title_offset + speed / 12.5) % (text_w + 30)
         else:
             self.title_offset = 0.0
 

@@ -3,14 +3,13 @@ ring_gauge.py — Animated circular gauge for the Windows widget.
 Minor update: uses Segoe UI Variable instead of monospace.
 """
 import tkinter as tk
-from PIL import Image, ImageTk, ImageDraw
+from PIL import Image, ImageDraw, ImageTk
 
-from config import TRANSPARENT_KEY
 
 def _hex_to_rgb(hex_color: str) -> tuple:
-    hex_color = hex_color.lstrip('#')
+    hex_color = hex_color.lstrip("#")
     if len(hex_color) >= 6:
-        return tuple(int(hex_color[i:i+2], 16) for i in (0, 2, 4))
+        return tuple(int(hex_color[i:i + 2], 16) for i in (0, 2, 4))
     return (0, 0, 0)
 
 class RingGauge:
@@ -29,6 +28,10 @@ class RingGauge:
         self.font_size   = font_size
         self.value       = 0.0
         self.label_text  = "--"
+        self._last_draw_value = None
+        self._last_draw_label = None
+        self._image_cache: dict[int, ImageTk.PhotoImage] = {}
+        self._image_tk = None
 
         self.canvas = tk.Canvas(
             parent,
@@ -37,13 +40,20 @@ class RingGauge:
             highlightthickness=0,
         )
         self._job = None
-        self._image_tk = None
         self._draw()
 
     # ------------------------------------------------------------------
 
     def set(self, pct: float, label_text: str | None = None) -> None:
-        self.value = max(0.0, min(100.0, float(pct or 0)))
+        next_value = max(0.0, min(100.0, float(pct or 0)))
+        next_label = self.label_text if label_text is None else label_text
+        if (
+            self._last_draw_value is not None
+            and abs(next_value - self.value) < 0.5
+            and next_label == self.label_text
+        ):
+            return
+        self.value = next_value
         if label_text is not None:
             self.label_text = label_text
         self._draw()
@@ -52,7 +62,10 @@ class RingGauge:
                    duration_ms: int = 300) -> None:
         target = max(0.0, min(100.0, float(pct or 0)))
         start  = self.value
-        steps  = max(1, duration_ms // 30)
+        if abs(target - start) < 1.0:
+            self.set(target, label_text)
+            return
+        steps  = max(1, min(3, duration_ms // 60))
         if self._job:
             self.canvas.after_cancel(self._job)
 
@@ -74,36 +87,31 @@ class RingGauge:
     def _draw(self) -> None:
         c   = self.canvas
         s   = self.size
-
-        # Super-sample for anti-aliasing (draw at 4x size, scale down)
-        scale = 4
-        img_s = s * scale
-        
-        # Base image with background color
-        bg_rgb = _hex_to_rgb(self.bg)
-        img = Image.new("RGB", (img_s, img_s), bg_rgb)
-        draw = ImageDraw.Draw(img)
-
-        pad = (self.ring_width + 2) * scale
-        bounds = [pad, pad, img_s - pad, img_s - pad]
-        width = self.ring_width * scale
-
-        track_rgb = _hex_to_rgb(self.track_color)
-        color_rgb = _hex_to_rgb(self.color)
-
-        # Track (full circle)
-        draw.arc(bounds, 0, 360, fill=track_rgb, width=width)
-
-        # Filled arc (Pillow: 0 is 3 o'clock, clockwise. We want to start at 270 / top)
-        extent = self.value / 100.0 * 360.0
-        if extent > 0.5:
-            draw.arc(bounds, 270, 270 + extent, fill=color_rgb, width=width)
-
-        # Resize with Lanczos for smooth anti-aliasing
-        img = img.resize((s, s), Image.Resampling.LANCZOS)
-        self._image_tk = ImageTk.PhotoImage(img)
-
         c.delete("all")
+        cache_key = round(self.value)
+        image = self._image_cache.get(cache_key)
+        if image is None:
+            scale = 3
+            img_s = s * scale
+            img = Image.new("RGB", (img_s, img_s), _hex_to_rgb(self.bg))
+            draw = ImageDraw.Draw(img)
+
+            pad = (self.ring_width + 2) * scale
+            bounds = [pad, pad, img_s - pad, img_s - pad]
+            width = self.ring_width * scale
+
+            draw.arc(bounds, 0, 360, fill=_hex_to_rgb(self.track_color), width=width)
+            extent = cache_key / 100.0 * 360.0
+            if extent > 0.5:
+                draw.arc(bounds, 270, 270 + extent, fill=_hex_to_rgb(self.color), width=width)
+
+            img = img.resize((s, s), Image.Resampling.LANCZOS)
+            image = ImageTk.PhotoImage(img)
+            if len(self._image_cache) > 128:
+                self._image_cache.clear()
+            self._image_cache[cache_key] = image
+
+        self._image_tk = image
         c.create_image(s / 2, s / 2, image=self._image_tk)
 
         # Centre label
@@ -113,3 +121,5 @@ class RingGauge:
             fill=self.text_color,
             font=(self.font, self.font_size, "bold"),
         )
+        self._last_draw_value = self.value
+        self._last_draw_label = self.label_text

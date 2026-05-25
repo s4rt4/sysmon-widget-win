@@ -149,6 +149,20 @@ The build uses `--onedir`, `--noupx`, and Windows version metadata to reduce
 false-positive antivirus detections. For distribution beyond your own machine,
 code-signing the generated `SysmonWidget.exe` is still recommended.
 
+## Native Rewrite Prototype
+
+The native Win32 rewrite has started in [src/native](src/native). It is currently
+Phase 0: a static Direct2D widget shell with tray Show, Hide, and Exit controls.
+
+Build it from a Visual Studio Developer PowerShell with CMake installed:
+
+```powershell
+.\build-native.ps1 -Run
+```
+
+The Python implementation remains the reference app until the native rewrite has
+real metrics and settings parity.
+
 ## Notes
 
 - Weather and temperature polling run in background threads so slow network or
