@@ -1,5 +1,6 @@
 #include "widget_app.h"
 
+#include "brightness_poller.h"
 #include "music_poller.h"
 #include "process_poller.h"
 #include "process_sampler.h"
@@ -21,6 +22,7 @@
 #include <ws2def.h>
 #include <ws2ipdef.h>
 #include <audioclient.h>
+#include <endpointvolume.h>
 #include <gdiplus.h>
 #include <iphlpapi.h>
 #include <mmdeviceapi.h>
@@ -151,6 +153,11 @@ std::string WideToUtf8(const std::wstring& value) {
         return {};
     }
     const int size = WideCharToMultiByte(CP_UTF8, 0, value.c_str(), -1, nullptr, 0, nullptr, nullptr);
+    if (size <= 0) {
+        // Conversion failed — size_t(size-1) would underflow to SIZE_MAX
+        // and string ctor would attempt a 18-exabyte allocation.
+        return {};
+    }
     std::string output(static_cast<size_t>(size - 1), '\0');
     WideCharToMultiByte(CP_UTF8, 0, value.c_str(), -1, output.data(), size, nullptr, nullptr);
     return output;
@@ -161,6 +168,9 @@ std::wstring Utf8ToWide(const std::string& value) {
         return {};
     }
     const int size = MultiByteToWideChar(CP_UTF8, 0, value.c_str(), -1, nullptr, 0);
+    if (size <= 0) {
+        return {};
+    }
     std::wstring output(static_cast<size_t>(size - 1), L'\0');
     MultiByteToWideChar(CP_UTF8, 0, value.c_str(), -1, output.data(), size);
     return output;
@@ -353,6 +363,117 @@ std::wstring GetEnvironmentString(const wchar_t* name) {
     return buffer;
 }
 
+std::filesystem::path ConfigJsonPath() {
+    const std::wstring appdata = GetEnvironmentString(L"APPDATA");
+    if (appdata.empty()) return {};
+    return std::filesystem::path(appdata) / L"SysmonWidget" / L"config.json";
+}
+
+// Minimal JSON-string escaper — same behaviour as the one in
+// settings_dialog.cpp, kept inline so widget_app.cpp doesn't need to share
+// a header with the dialog module for this small helper.
+std::string JsonString(const std::string& v) {
+    std::string r;
+    r.reserve(v.size() + 2);
+    r.push_back('"');
+    for (char c : v) {
+        switch (c) {
+        case '"':  r += "\\\""; break;
+        case '\\': r += "\\\\"; break;
+        case '\n': r += "\\n";  break;
+        case '\r': r += "\\r";  break;
+        case '\t': r += "\\t";  break;
+        default:
+            if (static_cast<unsigned char>(c) < 0x20) {
+                char buf[8];
+                std::snprintf(buf, sizeof(buf), "\\u%04x", c);
+                r += buf;
+            } else {
+                r.push_back(c);
+            }
+        }
+    }
+    r.push_back('"');
+    return r;
+}
+
+// Merge a top-level object value into existing JSON, preserving any other
+// top-level keys (e.g. weather/position written by the settings dialog).
+std::string MergeJsonObject(const std::string& existing, const std::string& key,
+                            const std::string& value_json) {
+    const std::string key_token = "\"" + key + "\"";
+    if (existing.empty()) {
+        return "{\n  " + key_token + ": " + value_json + "\n}\n";
+    }
+
+    size_t key_pos = existing.find(key_token);
+    if (key_pos != std::string::npos) {
+        size_t colon = existing.find(':', key_pos);
+        if (colon != std::string::npos) {
+            size_t vs = colon + 1;
+            while (vs < existing.size() &&
+                   std::isspace(static_cast<unsigned char>(existing[vs]))) ++vs;
+            if (vs < existing.size() && existing[vs] == '{') {
+                int depth = 0;
+                bool in_str = false, esc = false;
+                size_t ve = vs;
+                for (size_t i = vs; i < existing.size(); ++i) {
+                    char c = existing[i];
+                    if (in_str) {
+                        if (esc) esc = false;
+                        else if (c == '\\') esc = true;
+                        else if (c == '"') in_str = false;
+                    } else {
+                        if (c == '"') in_str = true;
+                        else if (c == '{') ++depth;
+                        else if (c == '}') {
+                            if (--depth == 0) { ve = i + 1; break; }
+                        }
+                    }
+                }
+                return existing.substr(0, vs) + value_json + existing.substr(ve);
+            }
+        }
+    }
+
+    size_t end = existing.find_last_of('}');
+    if (end == std::string::npos) {
+        return "{\n  " + key_token + ": " + value_json + "\n}\n";
+    }
+    std::string prefix = existing.substr(0, end);
+    while (!prefix.empty() && std::isspace(static_cast<unsigned char>(prefix.back()))) {
+        prefix.pop_back();
+    }
+    size_t open = prefix.find('{');
+    bool has_keys = false;
+    if (open != std::string::npos) {
+        for (size_t i = open + 1; i < prefix.size(); ++i) {
+            if (!std::isspace(static_cast<unsigned char>(prefix[i]))) {
+                has_keys = true; break;
+            }
+        }
+    }
+    std::string out = prefix;
+    if (has_keys) out += ",";
+    out += "\n  " + key_token + ": " + value_json + "\n}\n";
+    return out;
+}
+
+// Extract a JSON integer-as-string then parse to uint64. The existing
+// ExtractJsonInt returns int (32-bit) — not enough range for byte counters
+// which can exceed 2 GB.
+unsigned long long ExtractJsonUInt64(const std::string& json, const std::string& key,
+                                     unsigned long long fallback = 0) {
+    const std::string marker = "\"" + key + "\"";
+    size_t pos = json.find(marker);
+    if (pos == std::string::npos) return fallback;
+    pos = json.find(':', pos);
+    if (pos == std::string::npos) return fallback;
+    ++pos;
+    while (pos < json.size() && std::isspace(static_cast<unsigned char>(json[pos]))) ++pos;
+    try { return std::stoull(json.substr(pos)); } catch (...) { return fallback; }
+}
+
 std::wstring TitleCaseAscii(std::wstring value) {
     bool make_upper = true;
     for (wchar_t& ch : value) {
@@ -396,6 +517,12 @@ public:
             return false;
         }
 
+        // Also activate the endpoint volume control so we can publish the
+        // master volume percentage. Failure here is non-fatal — we just
+        // leave endpoint_volume_ null and report volume as N/A.
+        device_->Activate(__uuidof(IAudioEndpointVolume), CLSCTX_ALL, nullptr,
+                          reinterpret_cast<void**>(&endpoint_volume_));
+
         result = audio_client_->GetMixFormat(&format_);
         if (FAILED(result)) {
             return false;
@@ -421,9 +548,27 @@ public:
     }
 
     void Update(WidgetSnapshot& snapshot) {
-        if (!running_ && !Initialize()) {
-            Decay(snapshot, 0.88f);
-            return;
+        // Volume reading is independent of the loopback capture state —
+        // works even before the audio client is fully running.
+        if (endpoint_volume_) {
+            float v = 0.0f;
+            BOOL muted = FALSE;
+            if (SUCCEEDED(endpoint_volume_->GetMasterVolumeLevelScalar(&v))) {
+                endpoint_volume_->GetMute(&muted);
+                if (muted) snapshot.volume_percent = 0;
+                else       snapshot.volume_percent = static_cast<int>(v * 100.0f + 0.5f);
+            }
+        }
+
+        if (!running_) {
+            // Tear down any half-initialised handles from a previous
+            // attempt so we don't leak the partial COM objects when the
+            // device becomes available later.
+            Shutdown();
+            if (!Initialize()) {
+                Decay(snapshot, 0.88f);
+                return;
+            }
         }
 
         float level = 0.0f;
@@ -481,6 +626,7 @@ private:
         }
         running_ = false;
         SafeRelease(&capture_client_);
+        SafeRelease(&endpoint_volume_);
         if (format_) {
             CoTaskMemFree(format_);
             format_ = nullptr;
@@ -533,6 +679,7 @@ private:
     IMMDevice* device_ = nullptr;
     IAudioClient* audio_client_ = nullptr;
     IAudioCaptureClient* capture_client_ = nullptr;
+    IAudioEndpointVolume* endpoint_volume_ = nullptr;
     WAVEFORMATEX* format_ = nullptr;
     bool running_ = false;
 };
@@ -543,6 +690,10 @@ WidgetApp::WidgetApp(HINSTANCE instance)
       position_settings_(LoadPositionSettings()) {}
 
 WidgetApp::~WidgetApp() {
+    // Flush the latest network baseline so a graceful exit (tray → Exit)
+    // doesn't lose up-to-60-s of "Today" data. Safe to call even before
+    // any sample has been recorded — SaveNetworkState handles -1 sentinels.
+    SaveNetworkState();
     RemoveTrayIcon();
     if (icon_) {
         DestroyIcon(icon_);
@@ -585,9 +736,14 @@ bool WidgetApp::Initialize() {
     // Spin up background pollers — these all run on their own threads so
     // the UI never stalls on WMI / subprocess / WinHTTP / Toolhelp work.
     temperature_poller_ = std::make_unique<TemperaturePoller>();
+    brightness_poller_  = std::make_unique<BrightnessPoller>();
     process_poller_     = std::make_unique<ProcessPoller>(2);
     weather_fetcher_    = std::make_unique<WeatherFetcher>(weather_settings_);
     music_poller_       = std::make_unique<MusicPoller>();
+
+    // Load persisted "Today" network baselines so a widget restart
+    // doesn't reset today's accumulated usage to zero.
+    LoadNetworkState();
 
     UpdateSnapshot();
     UpdateSystemSnapshot();
@@ -668,6 +824,8 @@ LRESULT WidgetApp::HandleMessage(HWND hwnd, UINT message, WPARAM wparam, LPARAM 
             // can decide whether anything the user sees actually changed.
             wchar_t prev_time[16];
             wcscpy_s(prev_time, snapshot_.time);
+            wchar_t prev_secs[8];
+            wcscpy_s(prev_secs, snapshot_.seconds_text);
             wchar_t prev_uptime[32];
             wcscpy_s(prev_uptime, snapshot_.uptime_text);
             const bool prev_playing = snapshot_.music_playing;
@@ -687,16 +845,18 @@ LRESULT WidgetApp::HandleMessage(HWND hwnd, UINT message, WPARAM wparam, LPARAM 
                 SetTimer(hwnd_, kAudioTimer, desired, nullptr);
             }
 
-            // Only invalidate when at least one visible field changed:
-            //  - the minute portion of the clock (we don't render seconds)
-            //  - uptime (changes per minute too)
-            //  - music is playing (position counter advances every second)
+            // Invalidate when any visible field changed:
+            //  - seconds tick (always, every clock-timer fire)
+            //  - HH:MM portion of the clock
+            //  - uptime (changes per minute)
+            //  - music is playing (position advances every second)
             //  - end-of-track transition (playing→stopped)
-            const bool minute_changed = (wcscmp(prev_time, snapshot_.time) != 0);
-            const bool uptime_changed = (wcscmp(prev_uptime, snapshot_.uptime_text) != 0);
-            const bool music_changed  = (playing_now != prev_playing) ||
-                                        (playing_now && prev_pos != snapshot_.music_position);
-            if (minute_changed || uptime_changed || music_changed) {
+            const bool seconds_changed = (wcscmp(prev_secs, snapshot_.seconds_text) != 0);
+            const bool minute_changed  = (wcscmp(prev_time, snapshot_.time) != 0);
+            const bool uptime_changed  = (wcscmp(prev_uptime, snapshot_.uptime_text) != 0);
+            const bool music_changed   = (playing_now != prev_playing) ||
+                                         (playing_now && prev_pos != snapshot_.music_position);
+            if (seconds_changed || minute_changed || uptime_changed || music_changed) {
                 InvalidateRect(hwnd, nullptr, FALSE);
             }
         } else if (wparam == kSystemTimer) {
@@ -798,6 +958,9 @@ void WidgetApp::UpdateSnapshot() {
     std::tm local{};
     localtime_s(&local, &raw);
     wcsftime(snapshot_.time, _countof(snapshot_.time), L"%H:%M", &local);
+    // Seconds rendered separately under the date column. 2-digit only —
+    // no leading colon (user feedback: looked busy).
+    swprintf_s(snapshot_.seconds_text, L"%02d", local.tm_sec);
     // Day name + date with Indonesian month, hard-coded so we don't need
     // the system C locale set to id-ID.
     swprintf_s(snapshot_.weekday, L"%s", IndoWeekday(local.tm_wday));
@@ -895,6 +1058,15 @@ void WidgetApp::UpdateSystemSnapshot() {
         snapshot_.temperature_usage = 0.0f;
         CopyText(snapshot_.temperature_text, _countof(snapshot_.temperature_text), L"N/A");
     }
+
+    // Brightness — also from a background worker. Many desktop monitors
+    // don't expose WmiMonitorBrightness; leave as -1 in that case.
+    int brightness = -1;
+    if (brightness_poller_ && brightness_poller_->TryGet(&brightness)) {
+        snapshot_.brightness_percent = brightness;
+    } else {
+        snapshot_.brightness_percent = -1;
+    }
 }
 
 void WidgetApp::UpdateNetworkSnapshot() {
@@ -953,12 +1125,64 @@ void WidgetApp::UpdateNetworkSnapshot() {
         CopyText(snapshot_.network_up_text, _countof(snapshot_.network_up_text), L"0.0 KB/s");
     }
 
+    // ── Today's total usage (in + out) ────────────────────────────
+    // Baselines record the cumulative counter value at the start of the
+    // current calendar day. Reset on day rollover OR when the active
+    // interface LUID changes (counter values aren't comparable across
+    // different interfaces).
+    {
+        std::time_t raw = std::time(nullptr);
+        std::tm local{};
+        localtime_s(&local, &raw);
+        const bool day_changed = (local.tm_yday != today_yday_) ||
+                                 (local.tm_year != today_year_);
+        const bool iface_changed =
+            selected->InterfaceLuid.Value != previous_network_luid_ &&
+            previous_network_luid_ != 0;
+        if (day_changed || iface_changed || today_yday_ < 0) {
+            today_yday_  = local.tm_yday;
+            today_year_  = local.tm_year;
+            today_baseline_in_  = selected->InOctets;
+            today_baseline_out_ = selected->OutOctets;
+        }
+
+        const unsigned long long today_in =
+            selected->InOctets >= today_baseline_in_
+                ? selected->InOctets - today_baseline_in_ : 0;
+        const unsigned long long today_out =
+            selected->OutOctets >= today_baseline_out_
+                ? selected->OutOctets - today_baseline_out_ : 0;
+        const unsigned long long today_total = today_in + today_out;
+
+        // Format as "Today: X.X MB" or "Today: X.X GB" depending on size.
+        const double kib = today_total / 1024.0;
+        const double mib = kib / 1024.0;
+        const double gib = mib / 1024.0;
+        if (gib >= 1.0) {
+            swprintf_s(snapshot_.network_today_text, L"Today: %.2f GB", gib);
+        } else if (mib >= 1.0) {
+            swprintf_s(snapshot_.network_today_text, L"Today: %.1f MB", mib);
+        } else if (kib >= 1.0) {
+            swprintf_s(snapshot_.network_today_text, L"Today: %.0f KB", kib);
+        } else {
+            swprintf_s(snapshot_.network_today_text, L"Today: %llu B", today_total);
+        }
+    }
+
     previous_network_luid_ = selected->InterfaceLuid.Value;
     previous_network_in_ = selected->InOctets;
     previous_network_out_ = selected->OutOctets;
     previous_network_tick_ = now;
     has_previous_network_sample_ = true;
     FreeMibTable(table);
+
+    // Persist baseline + day-of-year every ~60 s so a crash or hard
+    // shutdown loses at most a minute of "Today" history. Cheap: a few-KB
+    // JSON merge once per minute.
+    if (now - last_network_save_tick_ >= 60'000) {
+        last_network_save_tick_ = now;
+        SaveNetworkState();
+    }
 }
 
 void WidgetApp::UpdateStorageSnapshot() {
@@ -1091,24 +1315,30 @@ void WidgetApp::UpdateProcessSnapshot() {
             CopyText(snapshot_.top_process_name[i],
                      _countof(snapshot_.top_process_name[i]), name.c_str());
 
-            // Format RAM as MB/GB.
+            // CPU + RAM are stored as separate strings so the renderer can
+            // draw an icon directly in front of each value.
+            wchar_t cpu_buf[16];
+            swprintf_s(cpu_buf, L"%.0f%%", entries[i].cpu_percent);
+            CopyText(snapshot_.top_process_cpu[i],
+                     _countof(snapshot_.top_process_cpu[i]), cpu_buf);
+
             const double rss_mb = static_cast<double>(entries[i].working_set_bytes) /
                                   (1024.0 * 1024.0);
-            wchar_t detail[64];
+            wchar_t ram_buf[16];
             if (rss_mb >= 1024.0) {
-                swprintf_s(detail, L"%.0f%%  %.1f GB",
-                           entries[i].cpu_percent, rss_mb / 1024.0);
+                swprintf_s(ram_buf, L"%.1f GB", rss_mb / 1024.0);
             } else {
-                swprintf_s(detail, L"%.0f%%  %.0f MB",
-                           entries[i].cpu_percent, rss_mb);
+                swprintf_s(ram_buf, L"%.0f MB", rss_mb);
             }
-            CopyText(snapshot_.top_process_detail[i],
-                     _countof(snapshot_.top_process_detail[i]), detail);
+            CopyText(snapshot_.top_process_ram[i],
+                     _countof(snapshot_.top_process_ram[i]), ram_buf);
         } else {
             CopyText(snapshot_.top_process_name[i],
                      _countof(snapshot_.top_process_name[i]), L"--");
-            CopyText(snapshot_.top_process_detail[i],
-                     _countof(snapshot_.top_process_detail[i]), L"--");
+            CopyText(snapshot_.top_process_cpu[i],
+                     _countof(snapshot_.top_process_cpu[i]), L"--");
+            CopyText(snapshot_.top_process_ram[i],
+                     _countof(snapshot_.top_process_ram[i]), L"--");
         }
     }
 }
@@ -1190,6 +1420,64 @@ PositionSettings WidgetApp::LoadPositionSettings() {
     if (p.anchor != L"left") p.anchor = L"right";
 
     return p;
+}
+
+void WidgetApp::LoadNetworkState() {
+    const auto path = ConfigJsonPath();
+    if (path.empty()) return;
+    const std::string json = ReadTextFile(path);
+    const std::string net = ExtractObject(json, "network");
+    if (net.empty()) return;
+
+    today_yday_         = ExtractJsonInt(net, "yday", -1);
+    today_year_         = ExtractJsonInt(net, "year", -1);
+    today_baseline_in_  = ExtractJsonUInt64(net, "baseline_in", 0);
+    today_baseline_out_ = ExtractJsonUInt64(net, "baseline_out", 0);
+
+    // Day-roll check: if the saved day isn't today, drop the saved
+    // baselines — UpdateNetworkSnapshot will reset on the next sample.
+    std::time_t raw = std::time(nullptr);
+    std::tm local{};
+    localtime_s(&local, &raw);
+    if (today_yday_ != local.tm_yday || today_year_ != local.tm_year) {
+        today_yday_ = -1;
+        today_year_ = -1;
+        today_baseline_in_ = 0;
+        today_baseline_out_ = 0;
+    }
+}
+
+void WidgetApp::SaveNetworkState() {
+    const auto path = ConfigJsonPath();
+    if (path.empty()) return;
+    std::error_code ec;
+    std::filesystem::create_directories(path.parent_path(), ec);
+
+    // Build the network object. baseline values can be huge (multi-GB
+    // counters), so we serialize as unsigned 64-bit.
+    std::string net = "{\n";
+    net += "    \"yday\": "         + std::to_string(today_yday_) + ",\n";
+    net += "    \"year\": "         + std::to_string(today_year_) + ",\n";
+    net += "    \"baseline_in\": "  + std::to_string(today_baseline_in_) + ",\n";
+    net += "    \"baseline_out\": " + std::to_string(today_baseline_out_) + "\n";
+    net += "  }";
+
+    const std::string existing = ReadTextFile(path);
+    const std::string merged = MergeJsonObject(existing, "network", net);
+
+    // Atomic write: write to a sibling .tmp file then MoveFileEx-replace
+    // the original. Prevents a crash mid-write from leaving config.json
+    // empty or truncated (which would lose ALL persisted settings, not
+    // just the network counters).
+    const auto tmp_path = std::filesystem::path(path).concat(L".tmp");
+    {
+        std::ofstream f(tmp_path, std::ios::binary | std::ios::trunc);
+        if (!f) return;
+        f.write(merged.data(), static_cast<std::streamsize>(merged.size()));
+        if (!f.good()) return;
+    }
+    MoveFileExW(tmp_path.c_str(), path.c_str(),
+                MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH);
 }
 
 unsigned long long WidgetApp::FileTimeToUint64(const FILETIME& value) {
@@ -1347,8 +1635,12 @@ void WidgetApp::RestartApp() {
                        nullptr, nullptr, &si, &pi)) {
         CloseHandle(pi.hProcess);
         CloseHandle(pi.hThread);
+        DestroyWindow(hwnd_);  // only exit when the replacement actually started
+    } else {
+        // CreateProcess failed — re-add our tray icon and stay alive so
+        // the user isn't left without a widget.
+        AddTrayIcon();
     }
-    DestroyWindow(hwnd_);
 }
 
 void WidgetApp::RemoveTrayIcon() {

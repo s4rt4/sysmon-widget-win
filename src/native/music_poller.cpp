@@ -43,10 +43,17 @@ MusicPoller::~MusicPoller() {
 
 void MusicPoller::WorkerLoop() {
     // SMTC objects are agile, so MTA on the worker is fine even though the
-    // UI thread uses STA.
-    winrt::init_apartment(winrt::apartment_type::multi_threaded);
+    // UI thread uses STA. We wrap the whole loop in try/catch so a
+    // WinRT/COM exception escaping a call (which can happen at shutdown
+    // when proxies tear down) does not std::terminate the process.
+    try {
+        winrt::init_apartment(winrt::apartment_type::multi_threaded);
+    } catch (...) {
+        return;
+    }
     namespace media = winrt::Windows::Media::Control;
 
+    try {
     while (!stop_.load()) {
         std::uint64_t request_id = 0;
         {
@@ -111,6 +118,13 @@ void MusicPoller::WorkerLoop() {
             results_.push(std::move(result));
         }
     }
+    } catch (...) {
+        // Swallow worker-side exceptions so the std::thread doesn't call
+        // std::terminate on the process at shutdown.
+    }
+    // Pair with init_apartment so the apartment refcount goes back to zero
+    // before the thread exits.
+    try { winrt::uninit_apartment(); } catch (...) {}
 }
 
 void MusicPoller::Tick(WidgetSnapshot& snapshot, std::uint64_t now_ms) {

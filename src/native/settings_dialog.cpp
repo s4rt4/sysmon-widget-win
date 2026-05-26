@@ -64,6 +64,7 @@ std::wstring GetEditText(HWND edit) {
 std::string WideToUtf8(const std::wstring& v) {
     if (v.empty()) return {};
     const int n = WideCharToMultiByte(CP_UTF8, 0, v.c_str(), -1, nullptr, 0, nullptr, nullptr);
+    if (n <= 0) return {};  // Avoid size_t(n-1) underflow on failure.
     std::string s(static_cast<size_t>(n - 1), '\0');
     WideCharToMultiByte(CP_UTF8, 0, v.c_str(), -1, s.data(), n, nullptr, nullptr);
     return s;
@@ -542,7 +543,17 @@ bool SettingsDialog::Show(HWND parent,
 
     // Modal-ish message pump until the dialog window is destroyed.
     MSG msg;
-    while (state.alive && GetMessageW(&msg, nullptr, 0, 0) > 0) {
+    while (state.alive) {
+        const BOOL r = GetMessageW(&msg, nullptr, 0, 0);
+        if (r == 0) {
+            // WM_QUIT — re-post for the outer message loop in
+            // WidgetApp::Run so the whole app shuts down cleanly. Without
+            // this the dialog's pump would swallow WM_QUIT and the main
+            // loop would block forever.
+            PostQuitMessage(static_cast<int>(msg.wParam));
+            break;
+        }
+        if (r < 0) break;  // GetMessage error — bail out.
         if (!IsDialogMessageW(hwnd, &msg)) {
             TranslateMessage(&msg);
             DispatchMessageW(&msg);

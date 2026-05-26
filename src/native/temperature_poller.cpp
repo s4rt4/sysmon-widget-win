@@ -106,23 +106,29 @@ TemperaturePoller::~TemperaturePoller() {
 }
 
 void TemperaturePoller::WorkerLoop() {
-    // Multithreaded COM apartment for WMI access.
-    CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+    // RPC_E_CHANGED_MODE means another apartment was already initialised
+    // on this thread — skip Uninit to avoid corrupting the refcount.
+    const HRESULT hr = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+    const bool needs_uninit = SUCCEEDED(hr) || hr == S_FALSE;
 
-    while (!stop_.load()) {
-        float t = 0.0f;
-        if (ReadTemperatureC(&t)) {
-            value_.store(t);
-            has_value_.store(true);
-        } else {
-            has_value_.store(false);
+    try {
+        while (!stop_.load()) {
+            float t = 0.0f;
+            if (ReadTemperatureC(&t)) {
+                value_.store(t);
+                has_value_.store(true);
+            } else {
+                has_value_.store(false);
+            }
+
+            std::unique_lock<std::mutex> lock(mu_);
+            cv_.wait_for(lock, kSampleInterval, [this] { return stop_.load(); });
         }
-
-        std::unique_lock<std::mutex> lock(mu_);
-        cv_.wait_for(lock, kSampleInterval, [this] { return stop_.load(); });
+    } catch (...) {
+        // Worker exceptions would otherwise std::terminate the process.
     }
 
-    CoUninitialize();
+    if (needs_uninit) CoUninitialize();
 }
 
 bool TemperaturePoller::TryGet(float* out) const {

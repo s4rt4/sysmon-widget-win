@@ -49,6 +49,9 @@ constexpr UINT32 kAccentHex[11] = {
 
 Renderer::~Renderer() {
     DiscardDeviceResources();
+    SafeRelease(&body_center_format_);
+    SafeRelease(&mdl2_center_format_);
+    SafeRelease(&mdl2_format_);
     SafeRelease(&weather_icon_format_);
     SafeRelease(&weather_temp_format_);
     SafeRelease(&small_format_);
@@ -107,6 +110,28 @@ bool Renderer::Initialize(HWND hwnd) {
     if (!CreateTextFormat(36.0f, DWRITE_FONT_WEIGHT_NORMAL, &weather_icon_format_)) {
         return false;
     }
+    // Segoe MDL2 Assets — monochrome line-art icon font shipped with
+    // Win10+. We use it for the speaker (E767) and brightness (E706)
+    // glyphs in the uptime strip card.
+    if (FAILED(write_factory_->CreateTextFormat(
+            L"Segoe MDL2 Assets", nullptr,
+            DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_STYLE_NORMAL,
+            DWRITE_FONT_STRETCH_NORMAL, 14.0f, L"en-us", &mdl2_format_))) {
+        return false;
+    }
+    // Centered MDL2 + body formats for the volume/brightness columns,
+    // where the values are short and the rest of the column is whitespace.
+    // Centering balances the left side (long uptime/boot text) with the
+    // right side (3-char percentages).
+    if (FAILED(write_factory_->CreateTextFormat(
+            L"Segoe MDL2 Assets", nullptr,
+            DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_STYLE_NORMAL,
+            DWRITE_FONT_STRETCH_NORMAL, 14.0f, L"en-us", &mdl2_center_format_))) {
+        return false;
+    }
+    if (!CreateTextFormat(13.0f, DWRITE_FONT_WEIGHT_NORMAL, &body_center_format_)) {
+        return false;
+    }
 
     body_format_->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
     muted_format_->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
@@ -117,6 +142,11 @@ bool Renderer::Initialize(HWND hwnd) {
     small_format_->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
     weather_temp_format_->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
     weather_icon_format_->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+    mdl2_format_->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+    mdl2_center_format_->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+    mdl2_center_format_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
+    body_center_format_->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+    body_center_format_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
 
     gauge_format_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
     gauge_format_->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
@@ -133,6 +163,12 @@ bool Renderer::Initialize(HWND hwnd) {
 
 void Renderer::Reset() {
     DiscardDeviceResources();
+    // Marquee state is presentation-only — drop it so the title doesn't
+    // skip frames after a DPI change (column width changes → wrap value
+    // changes → old offset would be out of bounds for one frame).
+    title_scroll_offset_ = 0.0f;
+    title_scroll_last_tick_ = 0;
+    title_prev_[0] = L'\0';
 }
 
 void Renderer::Resize(UINT width, UINT height) {
@@ -226,8 +262,23 @@ bool Renderer::EnsureDeviceResources() {
     width_ = static_cast<UINT>(client.right - client.left);
     height_ = static_cast<UINT>(client.bottom - client.top);
 
-    if (!EnsureBackBuffer()) {
+    // Guard against a zero-sized client area (window not yet shown).
+    // CreateDIBSection / CreateDCRenderTarget would otherwise fail and
+    // leave partially-initialised state.
+    if (width_ == 0 || height_ == 0) {
         return false;
+    }
+
+    // Helper: tear down whatever was created so far on a failure path —
+    // otherwise the next call sees target_/memory_dc_ non-null and the
+    // early-out would skip recreation of the missing brushes/formats.
+    auto fail = [this]() -> bool {
+        DiscardDeviceResources();
+        return false;
+    };
+
+    if (!EnsureBackBuffer()) {
+        return fail();
     }
 
     D2D1_RENDER_TARGET_PROPERTIES properties = D2D1::RenderTargetProperties(
@@ -235,11 +286,11 @@ bool Renderer::EnsureDeviceResources() {
         D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED));
 
     if (FAILED(factory_->CreateDCRenderTarget(&properties, &target_))) {
-        return false;
+        return fail();
     }
 
     if (FAILED(target_->BindDC(memory_dc_, &client))) {
-        return false;
+        return fail();
     }
 
     // Tell the render target what DPI it's actually drawing at. The bitmap
@@ -264,23 +315,23 @@ bool Renderer::EnsureDeviceResources() {
 
     // Solid card background (#0E2422) — no longer translucent.
     if (FAILED(target_->CreateSolidColorBrush(D2D1::ColorF(kCardBgHex), &panel_brush_))) {
-        return false;
+        return fail();
     }
     // White text content, muted gray captions, dark track for progress bars.
     if (FAILED(target_->CreateSolidColorBrush(D2D1::ColorF(kTextWhiteHex), &text_brush_))) {
-        return false;
+        return fail();
     }
     if (FAILED(target_->CreateSolidColorBrush(D2D1::ColorF(kTextMutedHex), &muted_brush_))) {
-        return false;
+        return fail();
     }
     if (FAILED(target_->CreateSolidColorBrush(D2D1::ColorF(kTrackBgHex), &track_brush_))) {
-        return false;
+        return fail();
     }
     // Per-card neon accents.
     for (int i = 0; i < AccentCount; ++i) {
         if (FAILED(target_->CreateSolidColorBrush(D2D1::ColorF(kAccentHex[i]),
                                                   &accent_brushes_[i]))) {
-            return false;
+            return fail();
         }
     }
 
@@ -391,11 +442,22 @@ void Renderer::DrawClockCard(const D2D1_RECT_F& rect, const WidgetSnapshot& snap
     DrawTextLine(snapshot.time, clock_format_, text_brush_,
                  Rect(left, rect.top, mid - 6.0f, rect.bottom));
 
-    // Right column: weekday (bigger now) + date+year stacked tightly.
+    // Thin vertical separator between the time block and the date column.
+    target_->DrawLine(
+        D2D1::Point2F(mid - 3.0f, rect.top + 26.0f),
+        D2D1::Point2F(mid - 3.0f, rect.bottom - 22.0f),
+        muted_brush_, 1.0f);
+
+    // Right column starts further from the separator so the text doesn't
+    // hug the line. weekday/date/seconds are stacked tightly around the
+    // card's vertical center.
+    const float r_left = mid + 12.0f;
     DrawTextLine(snapshot.weekday, heading_format_, accent_brushes_[AccentClock],
-                 Rect(mid, rect.top + 32.0f, right, rect.top + 68.0f));
+                 Rect(r_left, rect.top + 40.0f, right, rect.top + 70.0f));
     DrawTextLine(snapshot.date_long, date_format_, text_brush_,
-                 Rect(mid, rect.top + 74.0f, right, rect.top + 104.0f));
+                 Rect(r_left, rect.top + 72.0f, right, rect.top + 94.0f));
+    DrawTextLine(snapshot.seconds_text, body_format_, accent_brushes_[AccentClock],
+                 Rect(r_left, rect.top + 96.0f, right, rect.top + 118.0f));
 }
 
 void Renderer::DrawWeatherCard(const D2D1_RECT_F& rect, const WidgetSnapshot& snapshot) {
@@ -425,19 +487,27 @@ void Renderer::DrawWeatherCard(const D2D1_RECT_F& rect, const WidgetSnapshot& sn
 void Renderer::DrawNetworkCard(const D2D1_RECT_F& rect, const WidgetSnapshot& snapshot) {
     DrawRoundedCard(rect);
     const float left = rect.left + 14.0f;
+    const float right = rect.right - 12.0f;
     const float mid = rect.left + (rect.right - rect.left) / 2.0f;
-    const float top = rect.top + 12.0f;
 
     DrawTextLine(L"NETWORK", muted_format_, accent_brushes_[AccentNetwork],
-                 Rect(left, top, rect.right - 12.0f, top + 17.0f));
+                 Rect(left, rect.top + 10.0f, right, rect.top + 27.0f));
+
+    // Down/Up labels + values — compressed slightly so the daily total
+    // line below has room within the 108 px card.
     DrawTextLine(L"Download", small_format_, text_brush_,
-                 Rect(left, rect.top + 42.0f, mid - 6.0f, rect.top + 58.0f));
+                 Rect(left, rect.top + 34.0f, mid - 6.0f, rect.top + 48.0f));
     DrawTextLine(L"Upload", small_format_, text_brush_,
-                 Rect(mid + 6.0f, rect.top + 42.0f, rect.right - 12.0f, rect.top + 58.0f));
+                 Rect(mid + 6.0f, rect.top + 34.0f, right, rect.top + 48.0f));
     DrawTextLine(snapshot.network_down_text, body_format_, text_brush_,
-                 Rect(left, rect.top + 66.0f, mid - 6.0f, rect.bottom - 10.0f));
+                 Rect(left, rect.top + 52.0f, mid - 6.0f, rect.top + 72.0f));
     DrawTextLine(snapshot.network_up_text, body_format_, text_brush_,
-                 Rect(mid + 6.0f, rect.top + 66.0f, rect.right - 12.0f, rect.bottom - 10.0f));
+                 Rect(mid + 6.0f, rect.top + 52.0f, right, rect.top + 72.0f));
+
+    // Today's cumulative usage (in + out), reset at local-midnight.
+    DrawTextLine(snapshot.network_today_text, small_format_,
+                 accent_brushes_[AccentNetwork],
+                 Rect(left, rect.top + 84.0f, right, rect.bottom - 6.0f));
 }
 
 void Renderer::DrawInfoCard(const D2D1_RECT_F& rect, const wchar_t* heading, const wchar_t* value,
@@ -464,38 +534,108 @@ void Renderer::DrawProcessCard(const D2D1_RECT_F& rect, const WidgetSnapshot& sn
     DrawRoundedCard(rect);
     const float left = rect.left + 14.0f;
     const float right = rect.right - 14.0f;
+    ID2D1Brush* accent = accent_brushes_[AccentBattery];  // #00E676 green
 
-    DrawTextLine(L"TOP PROCESSES", muted_format_, text_brush_,
+    // Header in green.
+    DrawTextLine(L"TOP PROCESSES", muted_format_, accent,
                  Rect(left, rect.top + 12.0f, right, rect.top + 29.0f));
 
-    // Two processes stacked vertically — each entry: bold name + CPU%/RAM
-    // detail underneath. Sized to fit a half-card (158 px tall).
+    // Two processes stacked vertically — each entry: bold name (white) +
+    // CPU icon + cpu% + RAM icon + ram value (all in green).
     const float row_top[2] = {rect.top + 42.0f, rect.top + 100.0f};
+
+    // Inline layout within the detail row. Numbers tuned for a half-card
+    // (~157 px text width). MDL2 icons E950=Processor, E88E=Memory.
+    constexpr float kIconW    = 16.0f;
+    constexpr float kCpuValW  = 32.0f;   // "100%" max
+    constexpr float kGapCol   = 8.0f;    // gap between CPU and RAM blocks
+    constexpr float kIconGap  = 3.0f;    // gap between icon and its value
+
     for (int i = 0; i < 2; ++i) {
+        // Process name (white, bold).
         DrawTextLine(snapshot.top_process_name[i], body_format_, text_brush_,
                      Rect(left, row_top[i], right, row_top[i] + 22.0f));
-        DrawTextLine(snapshot.top_process_detail[i], small_format_, text_brush_,
-                     Rect(left, row_top[i] + 24.0f, right, row_top[i] + 44.0f));
+
+        const float dy_top = row_top[i] + 24.0f;
+        const float dy_bot = row_top[i] + 44.0f;
+
+        // ── CPU icon (E950 Processor) + percent ─────────────────────
+        float x = left;
+        DrawTextLine(L"", mdl2_format_, accent,
+                     Rect(x, dy_top - 1.0f, x + kIconW, dy_bot));
+        x += kIconW + kIconGap;
+        DrawTextLine(snapshot.top_process_cpu[i], small_format_, accent,
+                     Rect(x, dy_top, x + kCpuValW, dy_bot));
+        x += kCpuValW + kGapCol;
+
+        // ── RAM icon (EEA1 Memory) + value ──────────────────────────
+        DrawTextLine(L"", mdl2_format_, accent,
+                     Rect(x, dy_top - 1.0f, x + kIconW, dy_bot));
+        x += kIconW + kIconGap;
+        DrawTextLine(snapshot.top_process_ram[i], small_format_, accent,
+                     Rect(x, dy_top, right, dy_bot));
     }
 }
 
 void Renderer::DrawUptimeCard(const D2D1_RECT_F& rect, const WidgetSnapshot& snapshot) {
     DrawRoundedCard(rect);
-    const float left = rect.left + 14.0f;
-    const float right = rect.right - 14.0f;
-    const float mid = rect.left + (rect.right - rect.left) * 0.50f;
+    const float left = rect.left + 12.0f;
+    const float right = rect.right - 12.0f;
+    const float total_w = right - left;
 
-    // Two columns: UPTIME on left, BOOT on right. Header (sky-blue accent)
-    // sits above the value. Tight ~56 px tall card.
+    // Unequal column widths — left half holds the long uptime/boot strings,
+    // right half holds short percentages. With equal widths the percentages
+    // would float against a wide empty column ("heavy left, empty right").
+    constexpr float kFracUptime = 0.28f;
+    constexpr float kFracBoot   = 0.32f;
+    constexpr float kFracVol    = 0.20f;
+    constexpr float kFracBrt    = 0.20f;
+
+    const float x0 = left;
+    const float x1 = x0 + total_w * kFracUptime;
+    const float x2 = x1 + total_w * kFracBoot;
+    const float x3 = x2 + total_w * kFracVol;
+    const float x4 = right;
+    constexpr float kGap = 4.0f;
+    (void)kFracBrt;  // implied by x4 = right
+
+    // ─── Column 1: UPTIME (left-aligned, fills column) ──────────────
     DrawTextLine(L"UPTIME", muted_format_, accent_brushes_[AccentUptime],
-                 Rect(left, rect.top + 8.0f, mid - 6.0f, rect.top + 24.0f));
+                 Rect(x0, rect.top + 8.0f, x1 - kGap, rect.top + 24.0f));
     DrawTextLine(snapshot.uptime_text, body_format_, text_brush_,
-                 Rect(left, rect.top + 26.0f, mid - 6.0f, rect.top + 48.0f));
+                 Rect(x0, rect.top + 26.0f, x1 - kGap, rect.top + 48.0f));
 
+    // ─── Column 2: BOOT (left-aligned, fills column) ────────────────
     DrawTextLine(L"BOOT", muted_format_, accent_brushes_[AccentUptime],
-                 Rect(mid + 6.0f, rect.top + 8.0f, right, rect.top + 24.0f));
+                 Rect(x1, rect.top + 8.0f, x2 - kGap, rect.top + 24.0f));
     DrawTextLine(snapshot.boot_text, body_format_, text_brush_,
-                 Rect(mid + 6.0f, rect.top + 26.0f, right, rect.top + 48.0f));
+                 Rect(x1, rect.top + 26.0f, x2 - kGap, rect.top + 48.0f));
+
+    // ─── Column 3: VOLUME (icon + % centered in narrower column) ────
+    // U+E767 in Segoe MDL2 Assets = "Volume" speaker glyph.
+    DrawTextLine(L"", mdl2_center_format_, accent_brushes_[AccentUptime],
+                 Rect(x2, rect.top + 6.0f, x3 - kGap, rect.top + 26.0f));
+    wchar_t vol_text[8];
+    if (snapshot.volume_percent >= 0) {
+        swprintf_s(vol_text, L"%d%%", snapshot.volume_percent);
+    } else {
+        wcscpy_s(vol_text, L"--");
+    }
+    DrawTextLine(vol_text, body_center_format_, text_brush_,
+                 Rect(x2, rect.top + 26.0f, x3 - kGap, rect.top + 48.0f));
+
+    // ─── Column 4: BRIGHTNESS (icon + % centered) ───────────────────
+    // U+E706 in Segoe MDL2 Assets = "Brightness" sun glyph.
+    DrawTextLine(L"", mdl2_center_format_, accent_brushes_[AccentUptime],
+                 Rect(x3, rect.top + 6.0f, x4, rect.top + 26.0f));
+    wchar_t brt_text[8];
+    if (snapshot.brightness_percent >= 0) {
+        swprintf_s(brt_text, L"%d%%", snapshot.brightness_percent);
+    } else {
+        wcscpy_s(brt_text, L"--");
+    }
+    DrawTextLine(brt_text, body_center_format_, text_brush_,
+                 Rect(x3, rect.top + 26.0f, x4, rect.top + 48.0f));
 }
 
 void Renderer::DrawGaugeCard(const D2D1_RECT_F& rect, const wchar_t* label, float value,
@@ -574,8 +714,78 @@ void Renderer::DrawMusicCard(const D2D1_RECT_F& rect, const WidgetSnapshot& snap
     const wchar_t* header = snapshot.music_status[0] ? snapshot.music_status : L"♪ MUSIC";
     DrawTextLine(header, muted_format_, accent_brushes_[AccentMusic],
                  Rect(left, rect.top + 8.0f, col_left_right, rect.top + 24.0f));
-    DrawTextLine(snapshot.music_title, body_format_, text_brush_,
-                 Rect(left, rect.top + 26.0f, col_left_right, rect.top + 44.0f));
+    // ── Music title: marquee-scroll when it overflows the column ──
+    {
+        const float title_top    = rect.top + 26.0f;
+        const float title_bottom = rect.top + 44.0f;
+        const float visible_w    = col_left_right - left;
+
+        // Measure the title at body_format_ to know whether it overflows.
+        IDWriteTextLayout* layout = nullptr;
+        const UINT32 len = static_cast<UINT32>(std::wcslen(snapshot.music_title));
+        if (write_factory_ && len > 0) {
+            write_factory_->CreateTextLayout(snapshot.music_title, len,
+                                             body_format_, 10000.0f, 100.0f, &layout);
+        }
+        DWRITE_TEXT_METRICS m{};
+        if (layout) layout->GetMetrics(&m);
+        const float text_w = m.widthIncludingTrailingWhitespace;
+        SafeRelease(&layout);
+
+        // Reset scroll position when the track changes.
+        if (std::wcscmp(snapshot.music_title, title_prev_) != 0) {
+            title_scroll_offset_ = 0.0f;
+            wcsncpy_s(title_prev_, _countof(title_prev_), snapshot.music_title, _TRUNCATE);
+        }
+
+        if (text_w <= visible_w || len == 0) {
+            // Fits — draw normally, keep offset at 0.
+            title_scroll_offset_ = 0.0f;
+            DrawTextLine(snapshot.music_title, body_format_, text_brush_,
+                         Rect(left, title_top, col_left_right, title_bottom));
+        } else {
+            // Advance offset only while Playing. Pause halts the scroll
+            // (last_tick → 0 sentinel) so the title doesn't jump when
+            // playback resumes after a long gap.
+            const ULONGLONG now = GetTickCount64();
+            if (snapshot.music_playing) {
+                if (title_scroll_last_tick_ != 0) {
+                    const float dt_s = (now - title_scroll_last_tick_) / 1000.0f;
+                    if (dt_s < 1.0f) {  // clamp on long redraw gaps
+                        title_scroll_offset_ += dt_s * 25.0f;  // 25 px/s — "lambat"
+                    }
+                }
+                title_scroll_last_tick_ = now;
+            } else {
+                title_scroll_last_tick_ = 0;
+            }
+
+            const float gap = 40.0f;
+            const float wrap = text_w + gap;
+            if (title_scroll_offset_ > wrap) {
+                title_scroll_offset_ -= wrap;
+            }
+
+            // Clip strictly to the title column so the second copy doesn't
+            // bleed into the visualizer column or status row.
+            target_->PushAxisAlignedClip(
+                Rect(left, title_top, col_left_right, title_bottom),
+                D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+
+            const float draw_x = left - title_scroll_offset_;
+            DrawTextLine(snapshot.music_title, body_format_, text_brush_,
+                         Rect(draw_x, title_top, draw_x + text_w + 4.0f, title_bottom));
+            // Second copy starts after `wrap` so the scroll looks seamless
+            // — by the time the first copy is fully off-screen left, this
+            // one is at the original position.
+            const float draw_x2 = draw_x + wrap;
+            DrawTextLine(snapshot.music_title, body_format_, text_brush_,
+                         Rect(draw_x2, title_top, draw_x2 + text_w + 4.0f, title_bottom));
+
+            target_->PopAxisAlignedClip();
+        }
+    }
+
     DrawTextLine(snapshot.music_artist, small_format_, muted_brush_,
                  Rect(left, rect.top + 46.0f, col_left_right, rect.top + 60.0f));
 

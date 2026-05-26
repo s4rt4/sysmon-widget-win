@@ -8,25 +8,30 @@ struct WidgetSnapshot {
     static constexpr int VisualizerBars = 18;
 
     wchar_t time[16]{};
+    wchar_t seconds_text[8]{L"--"}; // ":07" – ticks every second
     wchar_t weekday[32]{};          // "Tuesday"
     wchar_t date_long[48]{};        // "26 May 2026"
     // Top 2 processes for the side-by-side process card.
     wchar_t top_process_name[2][32]{{L"--"}, {L"--"}};
-    wchar_t top_process_detail[2][64]{{L"CPU --  RAM --"}, {L"CPU --  RAM --"}};
+    wchar_t top_process_cpu[2][16]{{L"--"}, {L"--"}};  // "12%"
+    wchar_t top_process_ram[2][16]{{L"--"}, {L"--"}};  // "234 MB" / "1.2 GB"
     int top_process_count = 0;
     wchar_t weather_temp[32]{L"-- C"};
     wchar_t weather_city[64]{L"Weather"};
     wchar_t weather_detail[96]{L"Loading weather"};
     wchar_t weather_meta[64]{};
     wchar_t weather_icon[8]{L"☁"};  // ☁ default cloud
-    // Uptime / boot-time strip card at the very bottom of the widget.
+    // Uptime / boot / volume / brightness strip card at the bottom.
     wchar_t uptime_text[32]{L"--"};       // "1d 5h 23m"
     wchar_t boot_text[48]{L"--"};         // "26 May 08:10"
+    int volume_percent = -1;              // -1 = N/A, 0–100
+    int brightness_percent = -1;          // -1 = N/A, 0–100
     wchar_t music_title[128]{L"Stopped"};
     wchar_t music_artist[128]{L"No active session"};
     wchar_t music_status[32]{L"SMTC idle"};
     wchar_t network_down_text[32]{L"0.0 KB/s"};
     wchar_t network_up_text[32]{L"0.0 KB/s"};
+    wchar_t network_today_text[32]{L"Today: 0 B"};
     int storage_count = 0;
     wchar_t storage_label[2][16]{{L"C:"}, {L""}};
     wchar_t storage_percent_text[2][16]{{L"--"}, {L""}};
@@ -127,4 +132,14 @@ private:
     IDWriteTextFormat* small_format_ = nullptr;
     IDWriteTextFormat* weather_temp_format_ = nullptr; // 28pt (big °C)
     IDWriteTextFormat* weather_icon_format_ = nullptr; // 36pt (☀☁☂⚡❄)
+    IDWriteTextFormat* mdl2_format_ = nullptr;         // Segoe MDL2 Assets
+    IDWriteTextFormat* mdl2_center_format_ = nullptr;  // Segoe MDL2 Assets, centered
+    IDWriteTextFormat* body_center_format_ = nullptr;  // 13pt normal, centered
+
+    // Marquee scroll state for the music title. Only active when the title
+    // exceeds its column width. Stored in the renderer because animation
+    // state is presentation-only, not part of the data snapshot.
+    float title_scroll_offset_ = 0.0f;
+    ULONGLONG title_scroll_last_tick_ = 0;
+    wchar_t title_prev_[128]{};  // resets offset when track changes
 };

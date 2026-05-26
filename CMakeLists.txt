@@ -9,6 +9,7 @@ set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 
 add_executable(SysmonWidgetNative WIN32
     src/native/app.rc
+    src/native/brightness_poller.cpp
     src/native/main.cpp
     src/native/music_poller.cpp
     src/native/process_poller.cpp

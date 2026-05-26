@@ -16,6 +16,7 @@ namespace {
 std::string WideToUtf8(const std::wstring& v) {
     if (v.empty()) return {};
     const int n = WideCharToMultiByte(CP_UTF8, 0, v.c_str(), -1, nullptr, 0, nullptr, nullptr);
+    if (n <= 0) return {};  // Failed conversion — avoid size_t underflow.
     std::string s(static_cast<size_t>(n - 1), '\0');
     WideCharToMultiByte(CP_UTF8, 0, v.c_str(), -1, s.data(), n, nullptr, nullptr);
     return s;
@@ -24,6 +25,7 @@ std::string WideToUtf8(const std::wstring& v) {
 std::wstring Utf8ToWide(const std::string& v) {
     if (v.empty()) return {};
     const int n = MultiByteToWideChar(CP_UTF8, 0, v.c_str(), -1, nullptr, 0);
+    if (n <= 0) return {};  // Same guard for the reverse direction.
     std::wstring s(static_cast<size_t>(n - 1), L'\0');
     MultiByteToWideChar(CP_UTF8, 0, v.c_str(), -1, s.data(), n);
     return s;
@@ -140,6 +142,7 @@ bool WeatherFetcher::TryGet(Result* out) const {
 }
 
 void WeatherFetcher::WorkerLoop() {
+    try {
     auto last_fetch = std::chrono::steady_clock::time_point::min();
 
     while (!stop_.load()) {
@@ -187,6 +190,9 @@ void WeatherFetcher::WorkerLoop() {
         cv_.wait_for(lock, std::chrono::seconds(1),
                      [this] { return stop_.load() || request_now_.load(); });
     }
+    } catch (...) {
+        // Swallow worker exceptions so they don't std::terminate.
+    }
 }
 
 bool WeatherFetcher::FetchOnce(const WeatherSettings& s, Result* out) {
@@ -230,7 +236,12 @@ bool WeatherFetcher::FetchOnce(const WeatherSettings& s, Result* out) {
                             WINHTTP_NO_HEADER_INDEX);
         if (status == 200) {
             DWORD avail = 0;
-            while (WinHttpQueryDataAvailable(req, &avail) && avail > 0) {
+            // Cap response to 256 KB — OpenWeatherMap responses are
+            // typically <2 KB. Without a cap a buggy or hostile server
+            // could grow `response` until OOM.
+            constexpr size_t kMaxBody = 256 * 1024;
+            while (WinHttpQueryDataAvailable(req, &avail) && avail > 0 &&
+                   response.size() < kMaxBody) {
                 std::string chunk(avail, '\0');
                 DWORD read = 0;
                 if (!WinHttpReadData(req, chunk.data(), avail, &read) || read == 0) break;

@@ -8,6 +8,7 @@
 #include <windows.h>
 
 class AudioMeter;
+class BrightnessPoller;
 class MusicPoller;
 class ProcessPoller;
 class ProcessSampler;
@@ -72,6 +73,8 @@ private:
 
     static WeatherSettings LoadWeatherSettings();
     static PositionSettings LoadPositionSettings();
+    void LoadNetworkState();
+    void SaveNetworkState();
     static void FormatThroughput(unsigned long long bytes_per_second, wchar_t* output,
                                  size_t output_size, bool suffix_up);
     static unsigned long long FileTimeToUint64(const FILETIME& value);
@@ -86,6 +89,7 @@ private:
     std::unique_ptr<ProcessPoller> process_poller_;
     std::unique_ptr<TemperaturePoller> temperature_poller_;
     std::unique_ptr<WeatherFetcher> weather_fetcher_;
+    std::unique_ptr<BrightnessPoller> brightness_poller_;
     bool visible_ = true;
     // Smart-invalidate state: only call InvalidateRect when something the
     // user can actually see has changed. Saves a lot of UpdateLayeredWindow
@@ -104,4 +108,13 @@ private:
     unsigned long long previous_network_out_ = 0;
     ULONGLONG previous_network_tick_ = 0;
     bool has_previous_network_sample_ = false;
+    // Today's network usage accounting. Baselines are the cumulative
+    // counter values at the start of the current calendar day; today's
+    // usage = (current - baseline). Reset when the day-of-year changes.
+    // Persisted to config.json so widget restarts don't lose the count.
+    unsigned long long today_baseline_in_ = 0;
+    unsigned long long today_baseline_out_ = 0;
+    int today_yday_ = -1;     // tm_yday of the current accounting day
+    int today_year_ = -1;     // tm_year, so Jan 1 of next year resets too
+    ULONGLONG last_network_save_tick_ = 0;
 };

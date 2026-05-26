@@ -17,20 +17,24 @@ ProcessPoller::~ProcessPoller() {
 }
 
 void ProcessPoller::WorkerLoop() {
-    ProcessSampler sampler;
-    // Prime CPU-times cache so the second sample has meaningful deltas.
-    sampler.Sample(0);
+    try {
+        ProcessSampler sampler;
+        // Prime CPU-times cache so the second sample has meaningful deltas.
+        sampler.Sample(0);
 
-    while (!stop_.load()) {
-        auto entries = sampler.Sample(top_n_);
-        {
-            std::lock_guard<std::mutex> lock(mu_);
-            latest_ = std::move(entries);
-            has_value_.store(true);
+        while (!stop_.load()) {
+            auto entries = sampler.Sample(top_n_);
+            {
+                std::lock_guard<std::mutex> lock(mu_);
+                latest_ = std::move(entries);
+                has_value_.store(true);
+            }
+
+            std::unique_lock<std::mutex> lock(mu_);
+            cv_.wait_for(lock, kSampleInterval, [this] { return stop_.load(); });
         }
-
-        std::unique_lock<std::mutex> lock(mu_);
-        cv_.wait_for(lock, kSampleInterval, [this] { return stop_.load(); });
+    } catch (...) {
+        // Worker exceptions would otherwise std::terminate the process.
     }
 }
 
