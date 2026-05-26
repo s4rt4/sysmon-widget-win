@@ -79,7 +79,7 @@ bool Renderer::Initialize(HWND hwnd) {
 
     // 2x larger clock, left-aligned (time block on the left half of the
     // card). Date/weekday on the right are smaller.
-    if (!CreateTextFormat(88.0f, DWRITE_FONT_WEIGHT_SEMI_BOLD, &clock_format_)) {
+    if (!CreateTextFormat(82.0f, DWRITE_FONT_WEIGHT_SEMI_BOLD, &clock_format_)) {
         return false;
     }
     if (!CreateTextFormat(16.0f, DWRITE_FONT_WEIGHT_NORMAL, &date_format_)) {
@@ -150,9 +150,11 @@ bool Renderer::Initialize(HWND hwnd) {
 
     gauge_format_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
     gauge_format_->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
-    // Clock: time block is left-aligned and vertically centered. Day name +
-    // date sit on the right column with their own alignment.
-    clock_format_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
+    // Clock: time text horizontally CENTERED within its column (from the
+    // card's left edge to the vertical separator). With a symmetric rect
+    // around the column midpoint this gives equal left/right padding to
+    // the time digits, regardless of their rendered width.
+    clock_format_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
     clock_format_->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
     date_format_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
     weather_icon_format_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
@@ -434,18 +436,23 @@ void Renderer::DrawTextLine(const wchar_t* text, IDWriteTextFormat* format, ID2D
 
 void Renderer::DrawClockCard(const D2D1_RECT_F& rect, const WidgetSnapshot& snapshot) {
     DrawRoundedCard(rect);
-    // Big time on the left half, weekday + date on the right.
-    const float left = rect.left + 18.0f;
     const float right = rect.right - 16.0f;
-    const float mid = rect.left + (rect.right - rect.left) * 0.60f;
+    // Time column is widened (0.60 → 0.65) so 82-DIP "HH:MM" doesn't
+    // overflow into the separator. Right column still fits "Selasa /
+    // 26 Mei 2026" comfortably.
+    const float mid = rect.left + (rect.right - rect.left) * 0.65f;
+    const float sep_x = mid - 3.0f;
 
+    // Time text rect spans from the card's left edge to the separator,
+    // CENTER-aligned. Equal left/right padding falls out for free because
+    // the rect midpoint == column midpoint.
     DrawTextLine(snapshot.time, clock_format_, text_brush_,
-                 Rect(left, rect.top, mid - 6.0f, rect.bottom));
+                 Rect(rect.left, rect.top + 8.0f, sep_x, rect.bottom - 8.0f));
 
     // Thin vertical separator between the time block and the date column.
     target_->DrawLine(
-        D2D1::Point2F(mid - 3.0f, rect.top + 26.0f),
-        D2D1::Point2F(mid - 3.0f, rect.bottom - 22.0f),
+        D2D1::Point2F(sep_x, rect.top + 26.0f),
+        D2D1::Point2F(sep_x, rect.bottom - 22.0f),
         muted_brush_, 1.0f);
 
     // Right column starts further from the separator so the text doesn't
