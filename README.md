@@ -1,13 +1,46 @@
 # Sysmon Widget for Windows
 
-Conky-style desktop system monitor widget built with Python and Tkinter.
+Conky-style desktop system monitor widget for Windows. Two builds available:
 
-The current app targets Windows. It uses Tkinter transparent-color windows,
-Win32 window hints, psutil system metrics, OpenWeatherMap weather data, and
-Windows SMTC media sessions for the music panel. A system tray icon provides
-settings, show/hide, restart, autostart, and exit controls.
+| Build | Size | Memory | Best for |
+|---|---|---|---|
+| **Native C++** | 514 KB EXE / 249 KB zip | ~50 MB | daily use, autostart, no install |
+| **Python**     | 4.4 MB EXE / 28 MB zip | ~150 MB | hacking / panel customisation |
 
-## Setup
+Both share the same `%APPDATA%\SysmonWidget\config.json`, so you can switch
+between them without re-entering settings.
+
+## Download
+
+Grab the latest from [GitHub Releases](https://github.com/s4rt4/sysmon-widget-win/releases):
+
+- `SysmonWidget-native-vX.Y.Z-win-x64.zip` — single portable EXE, no installer, no runtime DLLs
+- `SysmonWidget-python-vX.Y.Z-win-x64.zip` — PyInstaller bundle (folder)
+
+Extract anywhere and run the EXE. Right-click the tray icon for Settings.
+
+## Panels
+
+Both builds render the same set of cards:
+
+- **Clock** — time + Indonesian weekday + date + ticking seconds
+- **Weather** — OpenWeatherMap-backed, with icon glyph, humidity, wind
+- **Network** — Download / Upload throughput + persistent "Today" total
+- **Sysstat** — CPU / RAM / Battery / Temperature ring gauges
+- **Music** — SMTC-driven, scrolling title marquee, real-audio visualiser (WASAPI loopback)
+- **Storage** — drive usage with bar
+- **Top Processes** — 2 highest by CPU%, with RAM
+- **Uptime / Boot / Volume / Brightness** — bottom strip card
+
+## Quick start (Native build)
+
+1. Download and unzip the native release somewhere persistent (e.g. `%LOCALAPPDATA%\SysmonWidget`).
+2. Double-click `SysmonWidgetNative.exe` — widget appears in the top-right of the work area.
+3. Right-click the tray icon → **Settings** to set the OpenWeatherMap API key, city, position anchor, and autostart.
+
+That's it. The EXE has a single-instance guard so double-click + autostart launch can't stack duplicate widgets.
+
+## Quick start (Python build)
 
 From PowerShell:
 
@@ -18,8 +51,7 @@ python -m pip install -r requirements.txt
 python sysmon_widget.py --managed
 ```
 
-`--managed` runs the widget as a normal debug window. To run it as a desktop
-widget hidden from the taskbar with a tray icon:
+`--managed` runs as a normal debug window. For the desktop widget mode with tray icon:
 
 ```powershell
 python sysmon_widget.py
@@ -27,147 +59,115 @@ python sysmon_widget.py
 
 ## Settings
 
-Right-click the tray icon and choose `Settings`.
+Right-click the tray icon → **Settings**.
 
-Settings are saved to:
+Both builds read/write `%APPDATA%\SysmonWidget\config.json`. The native build only touches the `weather`, `position`, and `network` keys — Python-specific keys (theme, panels, width) are preserved.
 
-```text
-%APPDATA%\SysmonWidget\config.json
-```
+The settings dialog exposes:
 
-The settings dialog can configure:
-
-- Theme
-- Weather API key
-- Weather city ID, city name, and country code
-- Widget width
-- Widget position anchor, X offset, and Y offset
-- Enabled panels
-- Start with Windows
+- **Weather** — API key, City, City ID, Country
+- **Position** — anchor (right/left), X offset, Y offset
+- **Startup** — Start with Windows toggle (HKCU Run entry)
 
 ## Weather API Key
 
-The weather panel reads the API key from environment variables or local config.
-Prefer one of these instead of editing source files.
+Get a free key from [OpenWeatherMap](https://openweathermap.org/api). Then either:
 
-PowerShell environment variable:
-
-```powershell
-$env:OPENWEATHERMAP_API_KEY = "YOUR_OPENWEATHERMAP_API_KEY"
-python sysmon_widget.py
-```
-
-Persistent local config:
-
-```powershell
-New-Item -ItemType Directory -Force "$HOME\.config\sysmon-widget"
-@'
-LOCAL_CONFIG = {
-    "weather": {
-        "api_key": "YOUR_OPENWEATHERMAP_API_KEY",
-    },
-}
-'@ | Set-Content "$HOME\.config\sysmon-widget\config.py"
-```
-
-During local development you can also create `local_config.py` in the project
-root. That file is gitignored. Settings saved by the tray dialog are loaded
-after local config and take priority.
-
-## Themes
-
-Choose a theme with:
-
-```powershell
-python sysmon_widget.py --theme graphite
-```
-
-Available themes:
-
-- `amber`
-- `forest-amber`
-- `graphite`
-- `midnight`
-- `purple`
-
-You can also set the default theme from local config:
-
-```python
-LOCAL_CONFIG = {
-    "theme": "midnight",
-}
-```
-
-## Configuration
-
-Edit [config.py](config.py) for defaults, or put overrides in `local_config.py`
-or:
-
-```text
-%USERPROFILE%\.config\sysmon-widget\config.py
-```
-
-Useful settings include:
-
-- `position`: widget anchor and screen offset
-- `width`: widget width
-- `panels`: enable or disable individual panels
-- `weather`: city, city id, units, refresh interval
-- `network`: interface selection and history length
-- `sysstat`: gauge size, refresh interval, battery and temperature visibility
-- `storage`: auto-detected drives or explicit paths, max visible drives
-- `music`: refresh interval, marquee speed, visualizer settings
+- Paste into the Settings dialog → Save
+- Or set environment variable `OPENWEATHERMAP_API_KEY` before launch
+- Or edit `%APPDATA%\SysmonWidget\config.json` directly
 
 ## Autostart
 
-The tray setting `Start with Windows` writes a user-level registry value:
+Settings → **Start with Windows** writes a per-user registry value:
 
 ```text
 HKCU\Software\Microsoft\Windows\CurrentVersion\Run\SysmonWidget
 ```
 
-It does not require administrator access.
+No administrator access required.
 
-## Build EXE
+## Building from source
 
-Install dependencies, then run:
+### Native (C++)
 
-```powershell
-.\build-exe.ps1
-```
-
-The app is built as:
-
-```text
-dist\SysmonWidget\SysmonWidget.exe
-```
-
-The generated EXE is windowless, starts the desktop widget, and exposes controls
-from the system tray.
-
-The build uses `--onedir`, `--noupx`, and Windows version metadata to reduce
-false-positive antivirus detections. For distribution beyond your own machine,
-code-signing the generated `SysmonWidget.exe` is still recommended.
-
-## Native Rewrite Prototype
-
-The native Win32 rewrite has started in [src/native](src/native). It is currently
-Phase 0: a static Direct2D widget shell with tray Show, Hide, and Exit controls.
-
-Build it from a Visual Studio Developer PowerShell with CMake installed:
+Requires CMake 3.24+ and Visual Studio 2022 Build Tools (or full VS). From a developer prompt:
 
 ```powershell
 .\build-native.ps1 -Run
 ```
 
-The Python implementation remains the reference app until the native rewrite has
-real metrics and settings parity.
+Output: `build-native\Release\SysmonWidgetNative.exe` (~500 KB, static MSVC runtime).
+
+If the icon design changes, regenerate `src/native/app.ico` from PowerShell:
+
+```powershell
+.\tools\make_icon.ps1
+```
+
+### Python (PyInstaller)
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install -r requirements.txt
+.\build-exe.ps1
+```
+
+Output: `dist\SysmonWidget\SysmonWidget.exe`. Uses `--onedir --windowed --noupx` with version-info metadata for AV-friendliness.
+
+## Configuration (Python build)
+
+Edit [config.py](config.py) for defaults, or override in `local_config.py` (gitignored) or `%USERPROFILE%\.config\sysmon-widget\config.py`. Useful keys:
+
+- `position`, `width`, `panels`, `weather`, `network`, `sysstat`, `storage`, `music`
+
+### Themes (Python only)
+
+```powershell
+python sysmon_widget.py --theme graphite
+```
+
+Available themes: `amber`, `forest-amber`, `graphite`, `midnight`, `purple`. The native build uses a single fixed palette (dark cards + per-card neon accents).
+
+## Architecture notes
+
+### Native build
+
+- **Direct2D + DirectWrite** rendering on a per-pixel-alpha layered window
+- **Per-Monitor DPI v2** with grayscale antialiasing (crisp at 100/125/150% scaling)
+- **Background worker threads** for SMTC music, process scan, WMI temperature, WMI brightness, WinHTTP weather — UI never blocks on slow I/O
+- **Smart invalidate** + adaptive audio frame rate (~1–2% CPU idle, ~0% hidden)
+- **Single-instance guard** via named mutex
+- **Atomic config writes** via `MoveFileExW(REPLACE_EXISTING|WRITE_THROUGH)`
+- **Static MSVC CRT** — portable single EXE, no vcruntime dependency
+
+### Python build
+
+- Tkinter with transparent-color windows + Win32 hints
+- Background threads for weather and temperature polling
+- Music via the `winrt` Python projection of Windows SMTC
+- Pillow for weather icons, psutil for system metrics
+
+## Compatibility
+
+- Windows 10 1703 or later (native build needs Per-Monitor DPI v2)
+- x64 architecture
+- Internet for weather, audio playback via SMTC-aware apps (Spotify, browsers, Dopamine, VLC, etc.) for the music panel
+- Temperature reading depends on hardware exposing `Win32_PerfFormattedData_Counters_ThermalZoneInformation` or `MSAcpi_ThermalZoneTemperature` — works on most laptops, varies on desktops
+- Brightness reading via `WmiMonitorBrightness` — laptops typically work, desktop monitors without DDC/CI show `--`
+
+## Project layout
+
+```
+src/native/       C++ source for the native build
+tools/            One-off helper scripts (e.g. make_icon.ps1)
+panels/           Python panel implementations
+utils/            Shared Python helpers
+packaging/linux/  Legacy Debian packaging (unmaintained)
+```
 
 ## Notes
 
-- Weather and temperature polling run in background threads so slow network or
-  WMI calls do not freeze the Tkinter UI.
-- Music uses Windows System Media Transport Controls through the `winrt`
-  packages. Apps such as Spotify, browsers, VLC, and other SMTC-aware players
-  can be detected.
-- Legacy Debian packaging has been moved to [packaging/linux](packaging/linux).
+- Both builds run continuously to track Network "Today" totals accurately. The native build persists baseline counters to `config.json` every 60 s + on graceful exit, so brief restarts don't reset the day's tally.
+- The native EXE is unsigned. Some AV / SmartScreen heuristics flag unsigned binaries — code-signing is recommended for redistribution.
