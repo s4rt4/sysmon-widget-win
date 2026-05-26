@@ -1,8 +1,13 @@
 #include <winver.h>
 
+// First ICON resource (numeric ID 1) = the icon Windows Explorer shows
+// for the EXE. Multi-size .ico (16/32/48/64/128/256) so every shell
+// context picks a sharp glyph.
+1 ICON "app.ico"
+
 VS_VERSION_INFO VERSIONINFO
-FILEVERSION    0,1,2,0
-PRODUCTVERSION 0,1,2,0
+FILEVERSION    0,1,3,0
+PRODUCTVERSION 0,1,3,0
 FILEFLAGSMASK  0x3fL
 FILEFLAGS      0x0L
 FILEOS         0x40004L
@@ -15,11 +20,11 @@ BEGIN
         BEGIN
             VALUE "CompanyName",      "Sysmon Widget"
             VALUE "FileDescription",  "Sysmon Widget Native"
-            VALUE "FileVersion",      "0.1.2.0"
+            VALUE "FileVersion",      "0.1.3.0"
             VALUE "InternalName",     "SysmonWidgetNative"
             VALUE "OriginalFilename", "SysmonWidgetNative.exe"
             VALUE "ProductName",      "Sysmon Widget Native"
-            VALUE "ProductVersion",   "0.1.2.0"
+            VALUE "ProductVersion",   "0.1.3.0"
         END
     END
     BLOCK "VarFileInfo"
