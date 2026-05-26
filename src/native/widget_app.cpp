@@ -1,5 +1,12 @@
 #include "widget_app.h"
 
+#include "music_poller.h"
+#include "process_poller.h"
+#include "process_sampler.h"
+#include "settings_dialog.h"
+#include "temperature_poller.h"
+#include "weather_fetcher.h"
+
 #include <algorithm>
 #include <cctype>
 #include <chrono>
@@ -7,12 +14,14 @@
 #include <cstdint>
 #include <ctime>
 #include <cwchar>
+#include <cwctype>
 #include <filesystem>
 #include <fstream>
 #include <iterator>
 #include <ws2def.h>
 #include <ws2ipdef.h>
 #include <audioclient.h>
+#include <gdiplus.h>
 #include <iphlpapi.h>
 #include <mmdeviceapi.h>
 #include <netioapi.h>
@@ -20,30 +29,105 @@
 #include <wbemidl.h>
 #include <winhttp.h>
 #include <winrt/Windows.Foundation.h>
-#include <winrt/Windows.Media.Control.h>
 #include <winrt/base.h>
 
 namespace {
 constexpr wchar_t kWindowClass[] = L"SysmonWidgetNativeWindow";
 constexpr UINT kTrayMessage = WM_APP + 1;
 constexpr UINT_PTR kClockTimer = 1;
-constexpr UINT_PTR kMusicTimer = 2;
+// kMusicTimer was removed — MusicPoller drives its own scheduling and is
+// ticked from kClockTimer at 1 Hz.
 constexpr UINT_PTR kSystemTimer = 3;
 constexpr UINT_PTR kWeatherTimer = 4;
 constexpr UINT_PTR kAudioTimer = 5;
-constexpr UINT kMenuShow = 1001;
-constexpr UINT kMenuHide = 1002;
-constexpr UINT kMenuExit = 1003;
+constexpr UINT kMenuShow      = 1001;
+constexpr UINT kMenuHide      = 1002;
+constexpr UINT kMenuSettings  = 1003;
+constexpr UINT kMenuAutostart = 1004;
+constexpr UINT kMenuRestart   = 1005;
+constexpr UINT kMenuExit      = 1006;
 
-RECT DefaultWidgetRect() {
+// HKCU Run value name for autostart — same string Python build uses, so
+// toggling either binary affects the same registry entry.
+constexpr wchar_t kAutostartName[] = L"SysmonWidget";
+constexpr wchar_t kAutostartKey[]  =
+    L"Software\\Microsoft\\Windows\\CurrentVersion\\Run";
+
+// Query system DPI without forcing a Win10 SDK target.
+UINT QuerySystemDpi() {
+    HMODULE user32 = GetModuleHandleW(L"user32.dll");
+    if (user32) {
+        using PFN = UINT (WINAPI*)();
+        auto pfn = reinterpret_cast<PFN>(GetProcAddress(user32, "GetDpiForSystem"));
+        if (pfn) return pfn();
+    }
+    HDC hdc = GetDC(nullptr);
+    UINT dpi = hdc ? static_cast<UINT>(GetDeviceCaps(hdc, LOGPIXELSX)) : 96u;
+    if (hdc) ReleaseDC(nullptr, hdc);
+    return dpi ? dpi : 96u;
+}
+
+RECT DefaultWidgetRect(const PositionSettings& pos) {
     RECT work{};
     SystemParametersInfoW(SPI_GETWORKAREA, 0, &work, 0);
 
-    constexpr int width = 380;
-    constexpr int height = 564;
-    constexpr int margin = 18;
-    return RECT{work.left + margin, work.top + margin, work.left + margin + width,
-                work.top + margin + height};
+    // App is DPI-aware, so SPI_GETWORKAREA reports physical pixels. Scale
+    // the design-unit dimensions by the system DPI so the widget looks the
+    // same size on a 100% and a 150% display.
+    const float scale = static_cast<float>(QuerySystemDpi()) / 96.0f;
+    const int width  = static_cast<int>(380.0f * scale);
+    // 626 + gap(10) + uptime-card(56) = 692.
+    const int height = static_cast<int>(692.0f * scale);
+    const int x_off  = static_cast<int>(pos.x * scale);
+    const int y_off  = static_cast<int>(pos.y * scale);
+
+    int left;
+    if (pos.anchor == L"left") {
+        left = work.left + x_off;
+    } else {
+        // Default: right-anchored (matches Python build).
+        left = work.right - x_off - width;
+    }
+    const int top = work.top + y_off;
+    return RECT{left, top, left + width, top + height};
+}
+
+// Indonesian day / month names. Hard-coded so we don't depend on the
+// system C-locale being set to id-ID.
+const wchar_t* IndoWeekday(int tm_wday) {
+    static const wchar_t* const names[7] = {
+        L"Minggu", L"Senin", L"Selasa", L"Rabu", L"Kamis", L"Jumat", L"Sabtu",
+    };
+    return (tm_wday >= 0 && tm_wday <= 6) ? names[tm_wday] : L"";
+}
+
+const wchar_t* IndoMonthLong(int tm_mon) {
+    static const wchar_t* const names[12] = {
+        L"Januari", L"Februari", L"Maret", L"April",  L"Mei",     L"Juni",
+        L"Juli",    L"Agustus",  L"September", L"Oktober", L"November", L"Desember",
+    };
+    return (tm_mon >= 0 && tm_mon <= 11) ? names[tm_mon] : L"";
+}
+
+const wchar_t* IndoMonthShort(int tm_mon) {
+    static const wchar_t* const names[12] = {
+        L"Jan", L"Feb", L"Mar", L"Apr", L"Mei", L"Jun",
+        L"Jul", L"Agu", L"Sep", L"Okt", L"Nov", L"Des",
+    };
+    return (tm_mon >= 0 && tm_mon <= 11) ? names[tm_mon] : L"";
+}
+
+// Map OpenWeatherMap "main" category to a single Unicode glyph rendered by
+// Segoe UI's symbol fallback chain. Keep this in one place so the renderer
+// only ever reads snapshot.weather_icon.
+const wchar_t* WeatherMainToIcon(const std::wstring& main) {
+    if (main == L"Clear")        return L"☀";
+    if (main == L"Clouds")       return L"☁";
+    if (main == L"Rain")         return L"☂";
+    if (main == L"Drizzle")      return L"☂";
+    if (main == L"Thunderstorm") return L"⚡";
+    if (main == L"Snow")         return L"❄";
+    return L"☁";  // Mist/Fog/Haze/Smoke/Dust/etc → generic cloud
 }
 
 void CopyText(wchar_t* destination, size_t size, const wchar_t* source) {
@@ -362,16 +446,31 @@ public:
         }
 
         if (!has_audio) {
-            Decay(snapshot, 0.82f);
+            Decay(snapshot, 0.62f);
             return;
         }
 
-        level = ClampRatio(std::sqrt(level) * 3.2f);
+        // Aggressive gain: typical music RMS lands near max so the height
+        // budget is "tall by default", and per-bar randomness creates the
+        // variance instead of the global level.
+        level = ClampRatio(std::sqrt(level) * 6.5f);
+
         for (int i = 0; i < WidgetSnapshot::VisualizerBars; ++i) {
-            const float shape = 0.42f + 0.58f * static_cast<float>(
-                std::sin(static_cast<double>(GetTickCount64()) * 0.007 + i * 0.91) * 0.5 + 0.5);
-            const float target = ClampRatio(0.08f + level * shape);
-            snapshot.music_levels[i] = snapshot.music_levels[i] * 0.42f + target * 0.58f;
+            // Pure per-bar randomness each frame — no sinusoidal shaping
+            // (which read as "ombak" / wave-like). pow(r, 0.4) skews the
+            // uniform distribution strongly toward 1.0, so the typical
+            // bar lands near the top with frequent dips, not the other
+            // way around. That's the "tinggi naiknya" feel.
+            const float r = static_cast<float>(rand()) /
+                            static_cast<float>(RAND_MAX);
+            const float shape = std::pow(r, 0.4f);  // 0..1, biased high
+            const float target = ClampRatio(level * shape);
+            // Very snappy attack: peaks pop into place. Moderate release
+            // so bars don't flicker.
+            const float alpha =
+                (target > snapshot.music_levels[i]) ? 0.92f : 0.28f;
+            snapshot.music_levels[i] =
+                snapshot.music_levels[i] * (1.0f - alpha) + target * alpha;
         }
     }
 
@@ -438,10 +537,17 @@ private:
     bool running_ = false;
 };
 
-WidgetApp::WidgetApp(HINSTANCE instance) : instance_(instance), weather_settings_(LoadWeatherSettings()) {}
+WidgetApp::WidgetApp(HINSTANCE instance)
+    : instance_(instance),
+      weather_settings_(LoadWeatherSettings()),
+      position_settings_(LoadPositionSettings()) {}
 
 WidgetApp::~WidgetApp() {
     RemoveTrayIcon();
+    if (icon_) {
+        DestroyIcon(icon_);
+        icon_ = nullptr;
+    }
 }
 
 bool WidgetApp::Initialize() {
@@ -456,7 +562,7 @@ bool WidgetApp::Initialize() {
 
     RegisterClassExW(&wc);
 
-    RECT rect = DefaultWidgetRect();
+    RECT rect = DefaultWidgetRect(position_settings_);
     hwnd_ = CreateWindowExW(
         WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_LAYERED,
         kWindowClass, L"Sysmon Widget", WS_POPUP,
@@ -471,21 +577,36 @@ bool WidgetApp::Initialize() {
         return false;
     }
 
+    // Seed rand() once so the visualizer doesn't replay an identical
+    // sequence every launch. (Sub-second granularity is enough for visual
+    // chaos — cryptographic randomness is overkill for bar heights.)
+    srand(static_cast<unsigned int>(GetTickCount64()));
+
+    // Spin up background pollers — these all run on their own threads so
+    // the UI never stalls on WMI / subprocess / WinHTTP / Toolhelp work.
+    temperature_poller_ = std::make_unique<TemperaturePoller>();
+    process_poller_     = std::make_unique<ProcessPoller>(2);
+    weather_fetcher_    = std::make_unique<WeatherFetcher>(weather_settings_);
+    music_poller_       = std::make_unique<MusicPoller>();
+
     UpdateSnapshot();
     UpdateSystemSnapshot();
     UpdateNetworkSnapshot();
     UpdateStorageSnapshot();
     UpdateWeatherSnapshot();
-    UpdateMusicSnapshot();
+    UpdateProcessSnapshot();
+    music_poller_->Tick(snapshot_, GetTickCount64());
     audio_meter_ = std::make_unique<AudioMeter>();
     audio_meter_->Initialize();
     UpdateAudioSnapshot();
     AddTrayIcon();
     SetTimer(hwnd_, kClockTimer, 1000, nullptr);
-    SetTimer(hwnd_, kMusicTimer, 2000, nullptr);
     SetTimer(hwnd_, kSystemTimer, 1500, nullptr);
-    SetTimer(hwnd_, kWeatherTimer, static_cast<UINT>(std::max(60, weather_settings_.refresh_sec)) * 1000, nullptr);
-    SetTimer(hwnd_, kAudioTimer, 160, nullptr);
+    // kWeatherTimer is gone — WeatherFetcher schedules its own refresh
+    // internally on its worker thread. kSystemTimer (1.5 s) polls the
+    // fetcher's cached result via UpdateWeatherSnapshot.
+    // 90 ms (~11 fps) — fast enough for snappy bar movement, still cheap.
+    SetTimer(hwnd_, kAudioTimer, 90, nullptr);
     ShowWindow(hwnd_, SW_SHOWNOACTIVATE);
     UpdateWindow(hwnd_);
     return true;
@@ -524,27 +645,80 @@ LRESULT WidgetApp::HandleMessage(HWND hwnd, UINT message, WPARAM wparam, LPARAM 
     case WM_SIZE:
         renderer_.Resize(LOWORD(lparam), HIWORD(lparam));
         return 0;
+    case WM_DPICHANGED: {
+        // System or per-monitor DPI changed. lParam is a RECT* with the
+        // suggested new window bounds for the target DPI — apply it as-is
+        // so window chrome and content scale correctly. Reset the renderer
+        // so its cached SetDpi picks up the new value on next paint.
+        RECT* suggested = reinterpret_cast<RECT*>(lparam);
+        if (suggested) {
+            SetWindowPos(hwnd_, nullptr,
+                         suggested->left, suggested->top,
+                         suggested->right - suggested->left,
+                         suggested->bottom - suggested->top,
+                         SWP_NOACTIVATE | SWP_NOZORDER);
+        }
+        renderer_.Reset();
+        InvalidateRect(hwnd, nullptr, FALSE);
+        return 0;
+    }
     case WM_TIMER:
         if (wparam == kClockTimer) {
+            // Capture previous visible state before mutating snapshot, so we
+            // can decide whether anything the user sees actually changed.
+            wchar_t prev_time[16];
+            wcscpy_s(prev_time, snapshot_.time);
+            wchar_t prev_uptime[32];
+            wcscpy_s(prev_uptime, snapshot_.uptime_text);
+            const bool prev_playing = snapshot_.music_playing;
+            const double prev_pos = snapshot_.music_position;
+
             UpdateSnapshot();
-            if (snapshot_.music_playing && snapshot_.music_duration > 0.0) {
-                snapshot_.music_position = std::min(snapshot_.music_duration, snapshot_.music_position + 1.0);
+            if (music_poller_) {
+                music_poller_->Tick(snapshot_, GetTickCount64());
             }
-            InvalidateRect(hwnd, nullptr, FALSE);
-        } else if (wparam == kMusicTimer) {
-            UpdateMusicSnapshot();
-            InvalidateRect(hwnd, nullptr, FALSE);
+
+            const bool playing_now = snapshot_.music_playing;
+            // Switch audio-frame rate based on playback so a silent widget
+            // doesn't run the visualizer at 11 fps.
+            const UINT desired = playing_now ? 90 : 250;
+            if (desired != audio_interval_ms_) {
+                audio_interval_ms_ = desired;
+                SetTimer(hwnd_, kAudioTimer, desired, nullptr);
+            }
+
+            // Only invalidate when at least one visible field changed:
+            //  - the minute portion of the clock (we don't render seconds)
+            //  - uptime (changes per minute too)
+            //  - music is playing (position counter advances every second)
+            //  - end-of-track transition (playing→stopped)
+            const bool minute_changed = (wcscmp(prev_time, snapshot_.time) != 0);
+            const bool uptime_changed = (wcscmp(prev_uptime, snapshot_.uptime_text) != 0);
+            const bool music_changed  = (playing_now != prev_playing) ||
+                                        (playing_now && prev_pos != snapshot_.music_position);
+            if (minute_changed || uptime_changed || music_changed) {
+                InvalidateRect(hwnd, nullptr, FALSE);
+            }
         } else if (wparam == kSystemTimer) {
             UpdateSystemSnapshot();
             UpdateNetworkSnapshot();
             UpdateStorageSnapshot();
-            InvalidateRect(hwnd, nullptr, FALSE);
-        } else if (wparam == kWeatherTimer) {
+            // Process / weather snapshots are just memcpys from background
+            // pollers — the actual scans/fetches run on worker threads, so
+            // polling them here every 1.5 s is cheap and gets fresh data
+            // onto the panel without waiting for kWeatherTimer (600 s).
+            UpdateProcessSnapshot();
             UpdateWeatherSnapshot();
             InvalidateRect(hwnd, nullptr, FALSE);
         } else if (wparam == kAudioTimer) {
             UpdateAudioSnapshot();
-            InvalidateRect(hwnd, nullptr, FALSE);
+            // Only repaint if visualizer bar heights actually moved enough
+            // to be visible (threshold inside UpdateAudioSnapshot). Saves
+            // ~10 wasted full-window UpdateLayeredWindow per second when
+            // music is paused/stopped.
+            if (audio_dirty_) {
+                InvalidateRect(hwnd, nullptr, FALSE);
+            }
         }
         return 0;
     case WM_CONTEXTMENU:
@@ -579,10 +753,37 @@ void WidgetApp::OnPaint() {
 void WidgetApp::OnCommand(UINT command) {
     switch (command) {
     case kMenuShow:
+        if (!visible_) {
+            visible_ = true;
+            // Resume the foreground timers. WeatherFetcher's own worker
+            // thread keeps running regardless of visibility, so weather
+            // data stays fresh in the background.
+            SetTimer(hwnd_, kClockTimer, 1000, nullptr);
+            SetTimer(hwnd_, kSystemTimer, 1500, nullptr);
+            SetTimer(hwnd_, kAudioTimer, 90, nullptr);
+        }
         ShowWindow(hwnd_, SW_SHOWNOACTIVATE);
         break;
     case kMenuHide:
+        if (visible_) {
+            visible_ = false;
+            // Kill foreground timers so a hidden widget consumes ~0% CPU.
+            // Background worker threads (music/process/temp/weather) keep
+            // running so data is fresh when the widget is unhidden.
+            KillTimer(hwnd_, kClockTimer);
+            KillTimer(hwnd_, kSystemTimer);
+            KillTimer(hwnd_, kAudioTimer);
+        }
         ShowWindow(hwnd_, SW_HIDE);
+        break;
+    case kMenuSettings:
+        OpenSettings();
+        break;
+    case kMenuAutostart:
+        SetAutostartEnabled(!IsAutostartEnabled());
+        break;
+    case kMenuRestart:
+        RestartApp();
         break;
     case kMenuExit:
         DestroyWindow(hwnd_);
@@ -597,7 +798,48 @@ void WidgetApp::UpdateSnapshot() {
     std::tm local{};
     localtime_s(&local, &raw);
     wcsftime(snapshot_.time, _countof(snapshot_.time), L"%H:%M", &local);
-    wcsftime(snapshot_.date, _countof(snapshot_.date), L"%A, %d %B %Y", &local);
+    // Day name + date with Indonesian month, hard-coded so we don't need
+    // the system C locale set to id-ID.
+    swprintf_s(snapshot_.weekday, L"%s", IndoWeekday(local.tm_wday));
+    swprintf_s(snapshot_.date_long, L"%d %s %d",
+               local.tm_mday, IndoMonthLong(local.tm_mon), local.tm_year + 1900);
+
+    // ── Uptime + boot time (strip card at the bottom) ──────────────────
+    const ULONGLONG up_ms = GetTickCount64();
+    const ULONGLONG up_sec = up_ms / 1000ULL;
+    const ULONGLONG days  = up_sec / 86400ULL;
+    const ULONGLONG hours = (up_sec % 86400ULL) / 3600ULL;
+    const ULONGLONG mins  = (up_sec % 3600ULL) / 60ULL;
+    if (days > 0) {
+        // For >1 day, use d/h/m form (more readable than total hours).
+        swprintf_s(snapshot_.uptime_text, L"%llud %lluh %llum", days, hours, mins);
+    } else if (hours > 0) {
+        swprintf_s(snapshot_.uptime_text, L"%lluh %llum", hours, mins);
+    } else {
+        swprintf_s(snapshot_.uptime_text, L"%llum", mins);
+    }
+
+    // Boot timestamp = now - uptime, derived via FILETIME arithmetic.
+    SYSTEMTIME now_st{};
+    GetLocalTime(&now_st);
+    FILETIME now_ft{};
+    SystemTimeToFileTime(&now_st, &now_ft);
+    ULARGE_INTEGER now_ui{};
+    now_ui.LowPart  = now_ft.dwLowDateTime;
+    now_ui.HighPart = now_ft.dwHighDateTime;
+    ULARGE_INTEGER boot_ui{};
+    // FILETIME unit is 100 ns, so multiply ms by 10 000.
+    boot_ui.QuadPart = now_ui.QuadPart - up_ms * 10000ULL;
+    FILETIME boot_ft{};
+    boot_ft.dwLowDateTime  = boot_ui.LowPart;
+    boot_ft.dwHighDateTime = boot_ui.HighPart;
+    SYSTEMTIME boot_st{};
+    if (FileTimeToSystemTime(&boot_ft, &boot_st)) {
+        // "26 Mei  08:10" — Indonesian short month, 24h time.
+        swprintf_s(snapshot_.boot_text, L"%d %s  %02d:%02d",
+                   boot_st.wDay, IndoMonthShort(boot_st.wMonth - 1),
+                   boot_st.wHour, boot_st.wMinute);
+    }
 }
 
 void WidgetApp::UpdateSystemSnapshot() {
@@ -643,19 +885,15 @@ void WidgetApp::UpdateSystemSnapshot() {
         CopyText(snapshot_.battery_text, _countof(snapshot_.battery_text), L"N/A");
     }
 
-    const ULONGLONG now = GetTickCount64();
-    if (!has_temperature_sample_ || now - last_temperature_tick_ > 10000) {
-        last_temperature_tick_ = now;
-        float temperature = 0.0f;
-        if (ReadTemperatureCelsius(&temperature)) {
-            snapshot_.temperature_usage = ClampRatio(temperature / 100.0f);
-            swprintf_s(snapshot_.temperature_text, L"%.0fC", temperature);
-            has_temperature_sample_ = true;
-        } else {
-            snapshot_.temperature_usage = 0.0f;
-            CopyText(snapshot_.temperature_text, _countof(snapshot_.temperature_text), L"N/A");
-            has_temperature_sample_ = true;
-        }
+    // Temperature is published asynchronously by TemperaturePoller — we
+    // just read whatever the worker last cached. Never blocks the UI.
+    float temperature = 0.0f;
+    if (temperature_poller_ && temperature_poller_->TryGet(&temperature)) {
+        snapshot_.temperature_usage = ClampRatio(temperature / 100.0f);
+        swprintf_s(snapshot_.temperature_text, L"%.0fC", temperature);
+    } else {
+        snapshot_.temperature_usage = 0.0f;
+        CopyText(snapshot_.temperature_text, _countof(snapshot_.temperature_text), L"N/A");
     }
 }
 
@@ -786,95 +1024,92 @@ void WidgetApp::UpdateStorageSnapshot() {
 }
 
 void WidgetApp::UpdateAudioSnapshot() {
-    if (audio_meter_) {
-        audio_meter_->Update(snapshot_);
+    if (!audio_meter_) {
+        audio_dirty_ = false;
+        return;
+    }
+    // Snapshot levels before update so we can detect material change.
+    // 1 % change per bar is the threshold below which the redraw isn't
+    // perceptible at 18 bars × ~80 px tall.
+    float prev[WidgetSnapshot::VisualizerBars];
+    for (int i = 0; i < WidgetSnapshot::VisualizerBars; ++i) {
+        prev[i] = snapshot_.music_levels[i];
+    }
+    audio_meter_->Update(snapshot_);
+
+    audio_dirty_ = false;
+    for (int i = 0; i < WidgetSnapshot::VisualizerBars; ++i) {
+        if (std::fabs(prev[i] - snapshot_.music_levels[i]) > 0.01f) {
+            audio_dirty_ = true;
+            break;
+        }
     }
 }
 
 void WidgetApp::UpdateWeatherSnapshot() {
-    const ULONGLONG now = GetTickCount64();
-    if (last_weather_tick_ != 0 &&
-        now - last_weather_tick_ < static_cast<ULONGLONG>(std::max(60, weather_settings_.refresh_sec)) * 1000) {
-        return;
-    }
-
-    last_weather_tick_ = now;
-    if (weather_settings_.api_key.empty() ||
-        weather_settings_.api_key == L"YOUR_OPENWEATHERMAP_API_KEY") {
-        CopyText(snapshot_.weather_temp, _countof(snapshot_.weather_temp), L"-- C");
-        CopyText(snapshot_.weather_city, _countof(snapshot_.weather_city), weather_settings_.city.c_str());
-        CopyText(snapshot_.weather_detail, _countof(snapshot_.weather_detail), L"API key missing");
-        CopyText(snapshot_.weather_meta, _countof(snapshot_.weather_meta), L"");
-        return;
-    }
-
-    if (!FetchWeather(weather_settings_, &snapshot_)) {
-        CopyText(snapshot_.weather_temp, _countof(snapshot_.weather_temp), L"-- C");
-        CopyText(snapshot_.weather_city, _countof(snapshot_.weather_city), weather_settings_.city.c_str());
-        CopyText(snapshot_.weather_detail, _countof(snapshot_.weather_detail), L"Weather unavailable");
-        CopyText(snapshot_.weather_meta, _countof(snapshot_.weather_meta), L"");
-    }
+    // WeatherFetcher runs on its own thread and decides when to refresh
+    // based on settings.refresh_sec. We just copy out whatever it has
+    // most recently published — never blocks on WinHTTP.
+    if (!weather_fetcher_) return;
+    WeatherFetcher::Result r;
+    if (!weather_fetcher_->TryGet(&r)) return;
+    CopyText(snapshot_.weather_temp,   _countof(snapshot_.weather_temp),   r.temp.c_str());
+    CopyText(snapshot_.weather_city,   _countof(snapshot_.weather_city),   r.city.c_str());
+    CopyText(snapshot_.weather_detail, _countof(snapshot_.weather_detail), r.detail.c_str());
+    CopyText(snapshot_.weather_meta,   _countof(snapshot_.weather_meta),   r.meta.c_str());
+    CopyText(snapshot_.weather_icon,   _countof(snapshot_.weather_icon),   r.icon.c_str());
 }
 
-void WidgetApp::UpdateMusicSnapshot() {
-    namespace media = winrt::Windows::Media::Control;
+void WidgetApp::UpdateProcessSnapshot() {
+    if (!process_poller_) {
+        return;
+    }
+    std::vector<ProcessSampler::Entry> entries;
+    if (!process_poller_->TryGet(&entries)) {
+        return;  // worker hasn't completed its first sample yet
+    }
+    snapshot_.top_process_count = static_cast<int>(entries.size());
 
-    try {
-        auto manager = media::GlobalSystemMediaTransportControlsSessionManager::RequestAsync().get();
-        auto session = manager.GetCurrentSession();
-        if (!session) {
-            CopyText(snapshot_.music_title, _countof(snapshot_.music_title), L"Stopped");
-            CopyText(snapshot_.music_artist, _countof(snapshot_.music_artist), L"No active session");
-            CopyText(snapshot_.music_status, _countof(snapshot_.music_status), L"SMTC idle");
-            snapshot_.music_position = 0.0;
-            snapshot_.music_duration = 0.0;
-            snapshot_.music_playing = false;
-            return;
+    for (int i = 0; i < 2; ++i) {
+        if (i < static_cast<int>(entries.size())) {
+            // Trim ".exe" suffix for display brevity (keep if name is short
+            // enough that trimming makes it ambiguous).
+            std::wstring name = entries[i].name;
+            if (name.size() > 4) {
+                auto pos = name.size() - 4;
+                if (name.compare(pos, 4, L".exe") == 0 ||
+                    name.compare(pos, 4, L".EXE") == 0) {
+                    name.resize(pos);
+                }
+            }
+            // Truncate long names so they fit in a half-card column.
+            constexpr size_t kMaxName = 16;
+            if (name.size() > kMaxName) {
+                name.resize(kMaxName - 1);
+                name += L"…";
+            }
+            CopyText(snapshot_.top_process_name[i],
+                     _countof(snapshot_.top_process_name[i]), name.c_str());
+
+            // Format RAM as MB/GB.
+            const double rss_mb = static_cast<double>(entries[i].working_set_bytes) /
+                                  (1024.0 * 1024.0);
+            wchar_t detail[64];
+            if (rss_mb >= 1024.0) {
+                swprintf_s(detail, L"%.0f%%  %.1f GB",
+                           entries[i].cpu_percent, rss_mb / 1024.0);
+            } else {
+                swprintf_s(detail, L"%.0f%%  %.0f MB",
+                           entries[i].cpu_percent, rss_mb);
+            }
+            CopyText(snapshot_.top_process_detail[i],
+                     _countof(snapshot_.top_process_detail[i]), detail);
+        } else {
+            CopyText(snapshot_.top_process_name[i],
+                     _countof(snapshot_.top_process_name[i]), L"--");
+            CopyText(snapshot_.top_process_detail[i],
+                     _countof(snapshot_.top_process_detail[i]), L"--");
         }
-
-        auto playback = session.GetPlaybackInfo();
-        switch (playback.PlaybackStatus()) {
-        case media::GlobalSystemMediaTransportControlsSessionPlaybackStatus::Playing:
-            CopyText(snapshot_.music_status, _countof(snapshot_.music_status), L"Playing");
-            break;
-        case media::GlobalSystemMediaTransportControlsSessionPlaybackStatus::Paused:
-            CopyText(snapshot_.music_status, _countof(snapshot_.music_status), L"Paused");
-            break;
-        case media::GlobalSystemMediaTransportControlsSessionPlaybackStatus::Stopped:
-            CopyText(snapshot_.music_status, _countof(snapshot_.music_status), L"Stopped");
-            break;
-        default:
-            CopyText(snapshot_.music_status, _countof(snapshot_.music_status), L"Unknown");
-            break;
-        }
-
-        auto properties = session.TryGetMediaPropertiesAsync().get();
-        auto timeline = session.GetTimelineProperties();
-        std::wstring title = properties.Title().c_str();
-        std::wstring artist = properties.Artist().c_str();
-
-        if (title.empty()) {
-            title = L"Active session";
-        }
-        if (artist.empty()) {
-            artist = L"Unknown artist";
-        }
-
-        CopyText(snapshot_.music_title, _countof(snapshot_.music_title), title.c_str());
-        CopyText(snapshot_.music_artist, _countof(snapshot_.music_artist), artist.c_str());
-        snapshot_.music_position =
-            static_cast<double>(std::chrono::duration_cast<std::chrono::seconds>(timeline.Position()).count());
-        snapshot_.music_duration =
-            static_cast<double>(std::chrono::duration_cast<std::chrono::seconds>(timeline.EndTime()).count());
-        snapshot_.music_playing =
-            playback.PlaybackStatus() == media::GlobalSystemMediaTransportControlsSessionPlaybackStatus::Playing;
-    } catch (const winrt::hresult_error&) {
-        CopyText(snapshot_.music_title, _countof(snapshot_.music_title), L"Music unavailable");
-        CopyText(snapshot_.music_artist, _countof(snapshot_.music_artist), L"SMTC read failed");
-        CopyText(snapshot_.music_status, _countof(snapshot_.music_status), L"Error");
-        snapshot_.music_position = 0.0;
-        snapshot_.music_duration = 0.0;
-        snapshot_.music_playing = false;
     }
 }
 
@@ -927,104 +1162,34 @@ WeatherSettings WidgetApp::LoadWeatherSettings() {
     return settings;
 }
 
-bool WidgetApp::FetchWeather(const WeatherSettings& settings, WidgetSnapshot* snapshot) {
-    if (!snapshot) {
-        return false;
-    }
+PositionSettings WidgetApp::LoadPositionSettings() {
+    PositionSettings p;
 
-    std::string path = "/data/2.5/weather?appid=" + UrlEncode(WideToUtf8(settings.api_key)) +
-                       "&units=" + UrlEncode(WideToUtf8(settings.units));
-    if (settings.city_id > 0) {
-        path += "&id=" + std::to_string(settings.city_id);
+    const std::wstring config_dir_override = GetEnvironmentString(L"SYSMON_WIDGET_CONFIG_DIR");
+    std::filesystem::path config_path;
+    if (!config_dir_override.empty()) {
+        config_path = std::filesystem::path(config_dir_override) / L"config.json";
     } else {
-        path += "&q=" + UrlEncode(WideToUtf8(settings.city + L"," + settings.country_code));
-    }
-
-    const std::wstring wide_path = Utf8ToWide(path);
-    HINTERNET session = WinHttpOpen(L"SysmonWidgetNative/0.1",
-                                    WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
-                                    WINHTTP_NO_PROXY_NAME,
-                                    WINHTTP_NO_PROXY_BYPASS, 0);
-    if (!session) {
-        return false;
-    }
-
-    WinHttpSetTimeouts(session, 3000, 3000, 5000, 8000);
-    HINTERNET connection = WinHttpConnect(session, L"api.openweathermap.org",
-                                         INTERNET_DEFAULT_HTTPS_PORT, 0);
-    if (!connection) {
-        WinHttpCloseHandle(session);
-        return false;
-    }
-
-    HINTERNET request = WinHttpOpenRequest(connection, L"GET", wide_path.c_str(),
-                                          nullptr, WINHTTP_NO_REFERER,
-                                          WINHTTP_DEFAULT_ACCEPT_TYPES,
-                                          WINHTTP_FLAG_SECURE);
-    bool ok = false;
-    std::string response;
-    if (request &&
-        WinHttpSendRequest(request, WINHTTP_NO_ADDITIONAL_HEADERS, 0,
-                           WINHTTP_NO_REQUEST_DATA, 0, 0, 0) &&
-        WinHttpReceiveResponse(request, nullptr)) {
-        DWORD status = 0;
-        DWORD status_size = sizeof(status);
-        WinHttpQueryHeaders(request,
-                            WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
-                            WINHTTP_HEADER_NAME_BY_INDEX, &status, &status_size,
-                            WINHTTP_NO_HEADER_INDEX);
-
-        if (status == 200) {
-            DWORD available = 0;
-            while (WinHttpQueryDataAvailable(request, &available) && available > 0) {
-                std::string chunk(available, '\0');
-                DWORD read = 0;
-                if (!WinHttpReadData(request, chunk.data(), available, &read) || read == 0) {
-                    break;
-                }
-                chunk.resize(read);
-                response += chunk;
-            }
-            ok = !response.empty();
+        const std::wstring appdata = GetEnvironmentString(L"APPDATA");
+        if (!appdata.empty()) {
+            config_path = std::filesystem::path(appdata) / L"SysmonWidget" / L"config.json";
         }
     }
 
-    if (request) {
-        WinHttpCloseHandle(request);
+    const std::string settings_json = config_path.empty() ? std::string{} : ReadTextFile(config_path);
+    const std::string position_json = ExtractObject(settings_json, "position");
+    if (!position_json.empty()) {
+        const std::string anchor = ExtractJsonString(position_json, "anchor", "right");
+        p.anchor = Utf8ToWide(anchor.empty() ? "right" : anchor);
+        p.x = ExtractJsonInt(position_json, "x", 16);
+        p.y = ExtractJsonInt(position_json, "y", 16);
     }
-    WinHttpCloseHandle(connection);
-    WinHttpCloseHandle(session);
+    // Normalize anchor — accept "Right"/"RIGHT" etc.
+    std::transform(p.anchor.begin(), p.anchor.end(), p.anchor.begin(),
+                   [](wchar_t c) { return static_cast<wchar_t>(towlower(c)); });
+    if (p.anchor != L"left") p.anchor = L"right";
 
-    if (!ok) {
-        return false;
-    }
-
-    const double temp = ExtractJsonDouble(response, "temp", 0.0);
-    const int humidity = ExtractJsonInt(response, "humidity", -1);
-    const double wind = ExtractJsonDouble(response, "speed", -1.0);
-    std::wstring city = Utf8ToWide(ExtractJsonString(response, "name", WideToUtf8(settings.city)));
-    std::wstring description = TitleCaseAscii(Utf8ToWide(ExtractJsonString(response, "description", "Unknown")));
-
-    if (city.empty()) {
-        city = settings.city;
-    }
-    swprintf_s(snapshot->weather_temp, L"%.0f C", temp);
-    CopyText(snapshot->weather_city, _countof(snapshot->weather_city), city.c_str());
-    CopyText(snapshot->weather_detail, _countof(snapshot->weather_detail), description.c_str());
-
-    std::wstring detail;
-    if (settings.show_wind && wind >= 0.0) {
-        wchar_t wind_text[32]{};
-        swprintf_s(wind_text, L"W %.1f", wind);
-        detail += wind_text;
-    }
-    if (settings.show_humidity && humidity >= 0) {
-        wchar_t humidity_text[32]{};
-        swprintf_s(humidity_text, L"%sH %d%%", detail.empty() ? L"" : L"  ", humidity);
-        detail += humidity_text;
-    }
-    CopyText(snapshot->weather_meta, _countof(snapshot->weather_meta), detail.c_str());
-    return true;
+    return p;
 }
 
 unsigned long long WidgetApp::FileTimeToUint64(const FILETIME& value) {
@@ -1034,105 +1199,62 @@ unsigned long long WidgetApp::FileTimeToUint64(const FILETIME& value) {
     return result.QuadPart;
 }
 
-bool WidgetApp::ReadTemperatureCelsius(float* temperature) {
-    if (!temperature) {
-        return false;
-    }
+HICON WidgetApp::BuildAppIcon(int size) {
+    using namespace Gdiplus;
+    Bitmap bmp(size, size, PixelFormat32bppPARGB);
+    Graphics g(&bmp);
+    g.SetSmoothingMode(SmoothingModeAntiAlias);
+    g.Clear(Color(0, 0, 0, 0));
 
-    long perf_temperature = 0;
-    if (QueryWmiLong(L"ROOT\\CIMV2",
-                     L"SELECT Temperature FROM Win32_PerfFormattedData_Counters_ThermalZoneInformation",
-                     L"Temperature", &perf_temperature) &&
-        perf_temperature > 273 && perf_temperature < 423) {
-        *temperature = static_cast<float>(perf_temperature - 273);
-        return true;
-    }
+    // Rounded card background — matches the widget's own card color
+    // (#0E2422) with a soft cyan border so the icon reads at small sizes.
+    const REAL pad = size * 0.06f;
+    const REAL w = size - pad * 2.0f;
+    const REAL h = size - pad * 2.0f;
+    const REAL r = size * 0.22f;
+    GraphicsPath path;
+    path.AddArc(pad,              pad,              r, r, 180.0f, 90.0f);
+    path.AddArc(pad + w - r,      pad,              r, r, 270.0f, 90.0f);
+    path.AddArc(pad + w - r,      pad + h - r,      r, r, 0.0f,   90.0f);
+    path.AddArc(pad,              pad + h - r,      r, r, 90.0f,  90.0f);
+    path.CloseFigure();
 
-    long acpi_temperature = 0;
-    if (QueryWmiLong(L"ROOT\\WMI",
-                     L"SELECT CurrentTemperature FROM MSAcpi_ThermalZoneTemperature",
-                     L"CurrentTemperature", &acpi_temperature) &&
-        acpi_temperature > 0) {
-        *temperature = static_cast<float>(acpi_temperature) / 10.0f - 273.15f;
-        return *temperature > -50.0f && *temperature < 150.0f;
-    }
+    SolidBrush bg(Color(255, 14, 36, 34));   // #0E2422
+    g.FillPath(&bg, &path);
+    Pen border(Color(255, 64, 196, 255), size * 0.04f);  // sky-blue rim
+    g.DrawPath(&border, &path);
 
-    return false;
-}
+    // Open ring — orange/amber, like a gauge dial.
+    const REAL ring_pad = size * 0.24f;
+    const REAL ring_size = size - ring_pad * 2.0f;
+    Pen ring_pen(Color(255, 255, 152, 0), size * 0.10f);
+    ring_pen.SetStartCap(LineCapRound);
+    ring_pen.SetEndCap(LineCapRound);
+    g.DrawArc(&ring_pen, ring_pad, ring_pad, ring_size, ring_size,
+              -130.0f, 280.0f);
 
-bool WidgetApp::QueryWmiLong(const wchar_t* namespace_name, const wchar_t* query,
-                             const wchar_t* property, long* value) {
-    if (!namespace_name || !query || !property || !value) {
-        return false;
-    }
+    // White center dot.
+    SolidBrush dot(Color(255, 247, 235, 237));
+    const REAL dot_pad = size * 0.40f;
+    g.FillEllipse(&dot, dot_pad, dot_pad, size - dot_pad * 2.0f, size - dot_pad * 2.0f);
 
-    HRESULT security = CoInitializeSecurity(nullptr, -1, nullptr, nullptr,
-                                            RPC_C_AUTHN_LEVEL_DEFAULT,
-                                            RPC_C_IMP_LEVEL_IMPERSONATE,
-                                            nullptr, EOAC_NONE, nullptr);
-    if (FAILED(security) && security != RPC_E_TOO_LATE) {
-        return false;
-    }
-
-    IWbemLocator* locator = nullptr;
-    HRESULT result = CoCreateInstance(CLSID_WbemLocator, nullptr, CLSCTX_INPROC_SERVER,
-                                      IID_IWbemLocator, reinterpret_cast<void**>(&locator));
-    if (FAILED(result)) {
-        return false;
-    }
-
-    BSTR namespace_bstr = SysAllocString(namespace_name);
-    IWbemServices* services = nullptr;
-    result = locator->ConnectServer(namespace_bstr, nullptr, nullptr, nullptr, 0, nullptr, nullptr, &services);
-    SysFreeString(namespace_bstr);
-    locator->Release();
-    if (FAILED(result)) {
-        return false;
-    }
-
-    CoSetProxyBlanket(services, RPC_C_AUTHN_WINNT, RPC_C_AUTHZ_NONE, nullptr,
-                      RPC_C_AUTHN_LEVEL_CALL, RPC_C_IMP_LEVEL_IMPERSONATE,
-                      nullptr, EOAC_NONE);
-
-    IEnumWbemClassObject* enumerator = nullptr;
-    BSTR query_language = SysAllocString(L"WQL");
-    BSTR query_bstr = SysAllocString(query);
-    result = services->ExecQuery(query_language, query_bstr,
-                                 WBEM_FLAG_FORWARD_ONLY | WBEM_FLAG_RETURN_IMMEDIATELY,
-                                 nullptr, &enumerator);
-    SysFreeString(query_bstr);
-    SysFreeString(query_language);
-    services->Release();
-    if (FAILED(result)) {
-        return false;
-    }
-
-    IWbemClassObject* object = nullptr;
-    ULONG returned = 0;
-    bool found = false;
-    result = enumerator->Next(1000, 1, &object, &returned);
-    if (SUCCEEDED(result) && returned > 0) {
-        VARIANT variant{};
-        VariantInit(&variant);
-        if (SUCCEEDED(object->Get(property, 0, &variant, nullptr, nullptr))) {
-            if (variant.vt == VT_I4 || variant.vt == VT_INT) {
-                *value = variant.lVal;
-                found = true;
-            } else if (variant.vt == VT_UI4 || variant.vt == VT_UINT) {
-                *value = static_cast<long>(variant.ulVal);
-                found = true;
-            }
-        }
-        VariantClear(&variant);
-        object->Release();
-    }
-
-    enumerator->Release();
-    return found;
+    HICON icon = nullptr;
+    bmp.GetHICON(&icon);
+    return icon;
 }
 
 void WidgetApp::AddTrayIcon() {
-    icon_ = LoadIconW(nullptr, IDI_APPLICATION);
+    // GDI+ is only used to render the tray icon glyph, so spin it up just
+    // long enough to build the HICON and shut it down again. Bitmap::GetHICON
+    // hands us a Win32 HICON that survives GDI+ teardown. Saves ~3 MB
+    // working set vs initializing GDI+ for the whole process lifetime.
+    {
+        Gdiplus::GdiplusStartupInput input;
+        ULONG_PTR token = 0;
+        Gdiplus::GdiplusStartup(&token, &input, nullptr);
+        icon_ = BuildAppIcon(32);
+        Gdiplus::GdiplusShutdown(token);
+    }
 
     NOTIFYICONDATAW data{};
     data.cbSize = sizeof(data);
@@ -1143,6 +1265,90 @@ void WidgetApp::AddTrayIcon() {
     data.hIcon = icon_;
     wcscpy_s(data.szTip, L"Sysmon Widget");
     Shell_NotifyIconW(NIM_ADD, &data);
+}
+
+bool WidgetApp::IsAutostartEnabled() {
+    HKEY key = nullptr;
+    if (RegOpenKeyExW(HKEY_CURRENT_USER, kAutostartKey, 0, KEY_READ, &key)
+        != ERROR_SUCCESS) {
+        return false;
+    }
+    DWORD type = 0;
+    DWORD size = 0;
+    const LONG r = RegQueryValueExW(key, kAutostartName, nullptr, &type, nullptr, &size);
+    RegCloseKey(key);
+    return r == ERROR_SUCCESS;
+}
+
+void WidgetApp::SetAutostartEnabled(bool enabled) {
+    if (enabled) {
+        wchar_t exe[MAX_PATH] = L"";
+        if (GetModuleFileNameW(nullptr, exe, MAX_PATH) == 0) return;
+        std::wstring quoted = L"\"";
+        quoted += exe;
+        quoted += L"\"";
+
+        HKEY key = nullptr;
+        if (RegCreateKeyExW(HKEY_CURRENT_USER, kAutostartKey, 0, nullptr, 0,
+                            KEY_WRITE, nullptr, &key, nullptr) == ERROR_SUCCESS) {
+            RegSetValueExW(key, kAutostartName, 0, REG_SZ,
+                           reinterpret_cast<const BYTE*>(quoted.c_str()),
+                           static_cast<DWORD>((quoted.size() + 1) * sizeof(wchar_t)));
+            RegCloseKey(key);
+        }
+    } else {
+        HKEY key = nullptr;
+        if (RegOpenKeyExW(HKEY_CURRENT_USER, kAutostartKey, 0, KEY_WRITE, &key)
+            == ERROR_SUCCESS) {
+            RegDeleteValueW(key, kAutostartName);
+            RegCloseKey(key);
+        }
+    }
+}
+
+void WidgetApp::OpenSettings() {
+    WeatherSettings ws_out;
+    PositionSettings ps_out;
+    if (!SettingsDialog::Show(hwnd_, weather_settings_, position_settings_,
+                              &ws_out, &ps_out)) {
+        return;
+    }
+    // Weather: push new settings to the background fetcher (also triggers
+    // an immediate re-fetch with the new credentials/city).
+    weather_settings_ = ws_out;
+    if (weather_fetcher_) weather_fetcher_->UpdateSettings(weather_settings_);
+
+    // Position: move window if it actually changed.
+    const bool moved = (ps_out.anchor != position_settings_.anchor ||
+                        ps_out.x != position_settings_.x ||
+                        ps_out.y != position_settings_.y);
+    position_settings_ = ps_out;
+    if (moved) {
+        RECT r = DefaultWidgetRect(position_settings_);
+        SetWindowPos(hwnd_, nullptr, r.left, r.top,
+                     r.right - r.left, r.bottom - r.top,
+                     SWP_NOACTIVATE | SWP_NOZORDER);
+    }
+}
+
+void WidgetApp::RestartApp() {
+    wchar_t exe[MAX_PATH] = L"";
+    if (GetModuleFileNameW(nullptr, exe, MAX_PATH) == 0) return;
+
+    // Remove our tray icon explicitly first so the new instance's NIM_ADD
+    // doesn't briefly coexist with ours (would show two stacked icons until
+    // mouse hover triggers a refresh).
+    RemoveTrayIcon();
+
+    STARTUPINFOW si{};
+    si.cb = sizeof(si);
+    PROCESS_INFORMATION pi{};
+    if (CreateProcessW(exe, nullptr, nullptr, nullptr, FALSE, 0,
+                       nullptr, nullptr, &si, &pi)) {
+        CloseHandle(pi.hProcess);
+        CloseHandle(pi.hThread);
+    }
+    DestroyWindow(hwnd_);
 }
 
 void WidgetApp::RemoveTrayIcon() {
@@ -1161,6 +1367,13 @@ void WidgetApp::ShowTrayMenu() {
     HMENU menu = CreatePopupMenu();
     AppendMenuW(menu, MF_STRING, kMenuShow, L"Show Widget");
     AppendMenuW(menu, MF_STRING, kMenuHide, L"Hide Widget");
+    AppendMenuW(menu, MF_STRING, kMenuSettings, L"Settings");
+    SetMenuDefaultItem(menu, kMenuSettings, FALSE);
+    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+    const bool on = IsAutostartEnabled();
+    AppendMenuW(menu, MF_STRING | (on ? MF_CHECKED : 0), kMenuAutostart,
+                L"Start with Windows");
+    AppendMenuW(menu, MF_STRING, kMenuRestart, L"Restart Widget");
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(menu, MF_STRING, kMenuExit, L"Exit");
 

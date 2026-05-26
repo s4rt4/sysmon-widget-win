@@ -7,5 +7,6 @@ build-deb/
 dist/
 release/
 *.deb
+*.zip
 local_config.py
 rewrite-plan.md

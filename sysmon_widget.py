@@ -4,9 +4,11 @@ Entry point for the Windows native sysmon widget.
 from __future__ import annotations
 
 import argparse
+import ctypes
 import subprocess
 import sys
 import tkinter as tk
+from ctypes import wintypes
 from pathlib import Path
 
 try:
@@ -23,6 +25,65 @@ from widget import WidgetLayout
 
 WINDOW_TITLE = "sysmon-widget"
 _LAYOUT: WidgetLayout | None = None
+
+# ---------------------------------------------------------------------------
+# Single-instance guard (Windows named mutex)
+# ---------------------------------------------------------------------------
+_SINGLE_INSTANCE_MUTEX_NAME = "SysmonWidget_SingleInstance_v1"
+_SINGLE_INSTANCE_HANDLE: int | None = None
+_ERROR_ALREADY_EXISTS = 183
+
+
+def _acquire_single_instance() -> bool:
+    """Return True if this is the only running instance.
+
+    Creates a Windows named mutex. While any process holds an open handle to
+    it, subsequent CreateMutexW calls with the same name return
+    ERROR_ALREADY_EXISTS — which we use to detect a duplicate launch.
+
+    The handle is kept in a module global so it lives for the process
+    lifetime; Windows releases the mutex automatically when the process
+    exits (including crashes). Use _release_single_instance() to release
+    early when spawning a replacement (e.g. tray-menu Restart).
+    """
+    global _SINGLE_INSTANCE_HANDLE
+    if sys.platform != "win32":
+        return True
+    try:
+        kernel32 = ctypes.windll.kernel32
+        kernel32.CreateMutexW.restype = wintypes.HANDLE
+        kernel32.CreateMutexW.argtypes = [
+            wintypes.LPVOID, wintypes.BOOL, wintypes.LPCWSTR,
+        ]
+        kernel32.GetLastError.restype = wintypes.DWORD
+        kernel32.CloseHandle.restype = wintypes.BOOL
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+
+        handle = kernel32.CreateMutexW(None, False, _SINGLE_INSTANCE_MUTEX_NAME)
+        if not handle:
+            # Couldn't create the mutex; rather than block startup, allow run.
+            return True
+        last_err = kernel32.GetLastError()
+        if last_err == _ERROR_ALREADY_EXISTS:
+            kernel32.CloseHandle(handle)
+            return False
+        _SINGLE_INSTANCE_HANDLE = handle
+        return True
+    except Exception:
+        # Never block startup on guard errors.
+        return True
+
+
+def _release_single_instance() -> None:
+    """Release the mutex so a replacement instance can acquire it."""
+    global _SINGLE_INSTANCE_HANDLE
+    if _SINGLE_INSTANCE_HANDLE is None:
+        return
+    try:
+        ctypes.windll.kernel32.CloseHandle(_SINGLE_INSTANCE_HANDLE)
+    except Exception:
+        pass
+    _SINGLE_INSTANCE_HANDLE = None
 
 
 def parse_args() -> argparse.Namespace:
@@ -54,6 +115,14 @@ def calculate_position(root: tk.Tk, width: int, height: int) -> tuple[int, int]:
 
 def main() -> None:
     args = parse_args()
+
+    if not _acquire_single_instance():
+        # Another instance is already running. Exit quietly so accidental
+        # double-launches (autostart + manual run, double-click, etc.) don't
+        # result in invisible duplicate widgets at the same screen position.
+        if args.managed:
+            print("[sysmon-widget] Another instance is already running. Exiting.")
+        sys.exit(0)
 
     if args.theme:
         apply_theme(args.theme)
@@ -118,6 +187,10 @@ def rebuild_widget(root: tk.Tk, apply_hints: bool = True) -> None:
 
 def _restart_app(root: tk.Tk, tray: TrayApp) -> None:
     tray.stop()
+    # Release the single-instance mutex BEFORE spawning the replacement so
+    # the new process can acquire it cleanly. (Without this the new process
+    # would see ERROR_ALREADY_EXISTS and exit immediately.)
+    _release_single_instance()
     if getattr(sys, "frozen", False):
         args = [sys.executable]
         cwd = Path(sys.executable).resolve().parent

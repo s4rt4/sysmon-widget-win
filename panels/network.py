@@ -58,10 +58,13 @@ class NetworkPanel:
             color=self.config["accent"]["text_muted"], anchor="e",
         )
 
+        # Pack order matters: reserve right-edge space for `total` BEFORE
+        # the sparkline expands, otherwise the sparkline (expand=True) eats
+        # the row and `total` ends up clipped (e.g. "26.13 MiB" → "07 MiB").
         icon.pack(side="left")
         value.pack(side="left", padx=(4, 2))
-        spark.canvas.pack(side="left", fill="x", expand=True)
-        total.pack(side="right")
+        total.pack(side="right", padx=(4, 0))
+        spark.canvas.pack(side="left", fill="x", expand=True, padx=(4, 4))
         return {"value": value, "total": total, "spark": spark}
 
     def _tick(self) -> None:

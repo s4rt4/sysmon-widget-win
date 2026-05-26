@@ -42,14 +42,23 @@ def _wmi_temperature() -> float | None:
             startupinfo.wShowWindow = subprocess.SW_HIDE
             creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
+        # Triple-layered hide:
+        #   1. -WindowStyle Hidden  → PowerShell's own first instruction
+        #   2. STARTF_USESHOWWINDOW + SW_HIDE  → startup info passed by Win32
+        #   3. CREATE_NO_WINDOW  → no console at all
+        # stdin=DEVNULL prevents the child from attaching to the parent's
+        # console (which is what causes the brief flash when the parent
+        # itself owns a console, e.g. `python.exe --managed`).
         result = subprocess.run(
-            ["powershell.exe", "-NoLogo", "-NoProfile", "-NonInteractive",
+            ["powershell.exe", "-WindowStyle", "Hidden",
+             "-NoLogo", "-NoProfile", "-NonInteractive",
              "-Command", _TEMP_PS_CMD],
             capture_output=True,
             text=True,
             timeout=3,
             startupinfo=startupinfo,
             creationflags=creationflags,
+            stdin=subprocess.DEVNULL,
         )
         out = result.stdout.strip()
         if out and out != "N/A":
